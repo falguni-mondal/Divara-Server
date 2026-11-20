@@ -35,6 +35,18 @@ const shippingAddressSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const attributionSchema = new mongoose.Schema(
+  {
+    utmSource: { type: String, default: "direct", lowercase: true, trim: true },
+    utmMedium: { type: String, default: "none", lowercase: true, trim: true },
+    utmCampaign: { type: String, default: "", lowercase: true, trim: true },
+    utmContent: { type: String, default: "", lowercase: true, trim: true },
+    referralPerson: { type: String, default: "", lowercase: true, trim: true },
+    landingPath: { type: String, default: "/", trim: true },
+  },
+  { _id: false }
+);
+
 const orderSchema = new mongoose.Schema(
   {
     orderNumber: {
@@ -63,6 +75,10 @@ const orderSchema = new mongoose.Schema(
     shippingAddress: {
       type: shippingAddressSchema,
       required: true,
+    },
+    attribution: {
+      type: attributionSchema,
+      default: () => ({}),
     },
     couponId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -112,5 +128,7 @@ const orderSchema = new mongoose.Schema(
 );
 
 orderSchema.index({ userId: 1, createdAt: -1 });
+orderSchema.index({ "attribution.utmSource": 1, status: 1 });
+orderSchema.index({ "attribution.referralPerson": 1, status: 1 });
 
 export const Order = mongoose.model("Order", orderSchema);

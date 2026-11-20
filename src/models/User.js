@@ -27,10 +27,26 @@ const userSchema = new mongoose.Schema(
       trim: true,
       index: true,
     },
+    notificationEmail: {
+      type: String,
+      lowercase: true,
+      trim: true,
+      default: null,
+    },
     passwordHash: {
       type: String,
       select: false,
       default: null,
+    },
+    // Super Admin TOTP Authenticator secret (strictly select: false)
+    totpSecret: {
+      type: String,
+      select: false,
+      default: null,
+    },
+    totpEnabled: {
+      type: Boolean,
+      default: false,
     },
     fullName: {
       type: String,
@@ -59,16 +75,11 @@ const userSchema = new mongoose.Schema(
     },
     role: {
       type: String,
-      enum: ["customer", "admin"],
+      enum: ["customer", "admin", "super_admin"],
       default: "customer",
+      index: true,
     },
-    // Stores Product slugs/IDs matching ShopContext.jsx wishlist[]
-    wishlist: [
-      {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: "Product",
-      },
-    ],
+    wishlist: [{ type: mongoose.Schema.Types.ObjectId, ref: "Product" }],
     addresses: [addressSchema],
     isActive: {
       type: Boolean,

@@ -8,6 +8,43 @@ const reviewImageSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const reviewReplySchema = new mongoose.Schema(
+  {
+    // Null = direct reply to the review; ObjectId = nested reply-to-reply
+    parentReplyId: {
+      type: mongoose.Schema.Types.ObjectId,
+      default: null,
+    },
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
+    authorName: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: 80,
+    },
+    authorRole: {
+      type: String,
+      enum: ["user", "admin"],
+      default: "user",
+    },
+    comment: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: 1500,
+    },
+    createdAt: {
+      type: Date,
+      default: Date.now,
+    },
+  },
+  { _id: true }
+);
+
 const reviewSchema = new mongoose.Schema(
   {
     productId: {
@@ -23,7 +60,6 @@ const reviewSchema = new mongoose.Schema(
       trim: true,
       index: true,
     },
-    // Null when isSeeded === true (Admin-seeded review)
     userId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
@@ -66,6 +102,10 @@ const reviewSchema = new mongoose.Schema(
         message: "You can upload a maximum of 3 images per review",
       },
     },
+    replies: {
+      type: [reviewReplySchema],
+      default: [],
+    },
     isVerifiedPurchase: {
       type: Boolean,
       default: false,
@@ -80,7 +120,6 @@ const reviewSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// Real users remain strictly 1 review per product; Admin can seed multiple reviews per product
 reviewSchema.index(
   { productId: 1, userId: 1 },
   { unique: true, partialFilterExpression: { userId: { $type: "objectId" } } }

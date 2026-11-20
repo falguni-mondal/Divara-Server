@@ -5,8 +5,14 @@ const jobSchema = new mongoose.Schema(
     type: {
       type: String,
       enum: [
+        "SEND_WELCOME_EMAIL",
         "SEND_ORDER_CONFIRMATION",
+        "SEND_ADMIN_ORDER_SUCCESS",
+        "SEND_ADMIN_ORDER_FAILURE",
+        "SEND_ORDER_STATUS_UPDATE",
         "SEND_CONTACT_ACK",
+        "SEND_ADMIN_NEW_TICKET",
+        "SEND_CONTACT_ADMIN_REPLY",
         "SEND_NEWSLETTER_WELCOME",
         "SEND_CONCIERGE_ALERT",
       ],
@@ -42,7 +48,6 @@ const jobSchema = new mongoose.Schema(
       type: Date,
       default: Date.now,
     },
-    // Auto-purge completed jobs after 24 hours via MongoDB TTL index
     completedAt: {
       type: Date,
       default: null,

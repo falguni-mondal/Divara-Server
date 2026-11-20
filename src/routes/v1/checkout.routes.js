@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
-import { requireAuth } from "../../middlewares/auth.middleware.js";
+import { requireAuth, blockAdminShopping } from "../../middlewares/auth.middleware.js";
 import { validate } from "../../middlewares/validate.middleware.js";
 import {
   startCheckout,
@@ -12,6 +12,17 @@ const router = Router();
 
 const checkoutSchema = z.object({
   couponCode: z.string().trim().min(2).max(40).nullable().optional(),
+  attribution: z
+    .object({
+      utmSource: z.string().trim().max(80).optional().default("direct"),
+      utmMedium: z.string().trim().max(80).optional().default("none"),
+      utmCampaign: z.string().trim().max(120).optional().default(""),
+      utmContent: z.string().trim().max(120).optional().default(""),
+      referralPerson: z.string().trim().max(100).optional().default(""),
+      landingPath: z.string().trim().max(300).optional().default("/"),
+    })
+    .nullable()
+    .optional(),
   shippingAddress: z.object({
     fullName: z.string().trim().min(2).max(120),
     email: z.string().email(),
@@ -25,7 +36,7 @@ const checkoutSchema = z.object({
   }),
 });
 
-router.use(requireAuth);
+router.use(requireAuth, blockAdminShopping);
 
 router.post("/session", validate(checkoutSchema), startCheckout);
 router.get("/orders", listMyOrders);

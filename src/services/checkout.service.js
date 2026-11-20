@@ -31,7 +31,10 @@ function generateOrderNumber() {
   return `DIV-${datePart}-${randPart}`;
 }
 
-export async function createCheckoutSession(req, { shippingAddress, couponCode = null }) {
+export async function createCheckoutSession(
+  req,
+  { shippingAddress, couponCode = null, attribution = null }
+) {
   const userId = req.user._id;
   const bag = await Bag.findOne({ userId }).lean();
 
@@ -50,7 +53,6 @@ export async function createCheckoutSession(req, { shippingAddress, couponCode =
     );
   }
 
-  // Evaluate manual coupon or best auto-apply coupon before locking stock
   const appliedCoupon = await resolveCheckoutCoupon({
     user: req.user,
     bagItems: bag.items,
@@ -112,7 +114,6 @@ export async function createCheckoutSession(req, { shippingAddress, couponCode =
         });
       }
 
-      // Atomically claim coupon usage slot if a coupon is applied
       let discountPaise = 0;
       let couponId = null;
       let usedCouponCode = null;
@@ -154,6 +155,16 @@ export async function createCheckoutSession(req, { shippingAddress, couponCode =
             customerEmail: shippingAddress.email || req.user.email,
             items: orderItems,
             shippingAddress,
+            attribution: attribution
+              ? {
+                  utmSource: attribution.utmSource || "direct",
+                  utmMedium: attribution.utmMedium || "none",
+                  utmCampaign: attribution.utmCampaign || "",
+                  utmContent: attribution.utmContent || "",
+                  referralPerson: attribution.referralPerson || "",
+                  landingPath: attribution.landingPath || "/",
+                }
+              : {},
             couponId,
             couponCode: usedCouponCode,
             subtotalPaise,
@@ -254,7 +265,10 @@ export async function processRazorpayWebhook({ rawBody, signature, eventId }) {
 
   const payload = JSON.parse(rawBody.toString("utf8"));
   const eventType = payload.event;
-  const dedupeId = eventId || `${eventType}:${payload?.payload?.payment?.entity?.id || Date.now()}`;
+  const paymentEntity = payload?.payload?.payment?.entity;
+  const rzpOrderId = paymentEntity?.order_id || payload?.payload?.order?.entity?.id;
+  const rzpPaymentId = paymentEntity?.id || null;
+  const dedupeId = eventId || `${eventType}:${rzpPaymentId || Date.now()}`;
 
   try {
     await WebhookEvent.create({ eventId: dedupeId, eventType });
@@ -263,13 +277,36 @@ export async function processRazorpayWebhook({ rawBody, signature, eventId }) {
     throw err;
   }
 
+  if (eventType === "payment.failed") {
+    const failedOrder = await Order.findOne({ razorpayOrderId: rzpOrderId }).lean();
+    if (failedOrder && failedOrder.status === "PENDING_PAYMENT") {
+      await Job.create({
+        type: "SEND_ADMIN_ORDER_FAILURE",
+        idempotencyKey: `admin-fail-${failedOrder.orderNumber}-${rzpPaymentId || Date.now()}`,
+        payload: {
+          orderNumber: failedOrder.orderNumber,
+          email: failedOrder.customerEmail,
+          fullName: failedOrder.shippingAddress?.fullName,
+          shippingAddress: failedOrder.shippingAddress,
+          items: failedOrder.items,
+          couponCode: failedOrder.couponCode,
+          totalInr: Math.round(failedOrder.totalPaise / 100),
+          razorpayOrderId: rzpOrderId,
+          razorpayPaymentId: rzpPaymentId,
+          failureReason:
+            paymentEntity?.error_description || paymentEntity?.error_reason || "Payment declined",
+          errorCode: paymentEntity?.error_code || "PAYMENT_FAILED",
+          paymentMethod: paymentEntity?.method || "Unknown",
+          failedAt: new Date(),
+        },
+      });
+    }
+    return { recordedFailure: true, eventType };
+  }
+
   if (eventType !== "payment.captured" && eventType !== "order.paid") {
     return { ignored: true, eventType };
   }
-
-  const paymentEntity = payload?.payload?.payment?.entity;
-  const rzpOrderId = paymentEntity?.order_id || payload?.payload?.order?.entity?.id;
-  const rzpPaymentId = paymentEntity?.id || null;
 
   const order = await Order.findOne({ razorpayOrderId: rzpOrderId });
   if (!order || order.status === "PAID") return { alreadyProcessed: true };
@@ -304,7 +341,7 @@ export async function processRazorpayWebhook({ rawBody, signature, eventId }) {
               variants: { $elemMatch: { size: item.size, stockOnHand: { $gte: item.quantity } } },
             },
             { $inc: { "variants.$.stockOnHand": -item.quantity } },
-            { session }
+            { session, returnDocument: "after" }
           );
           if (!updated) allDeducted = false;
         }
@@ -325,18 +362,33 @@ export async function processRazorpayWebhook({ rawBody, signature, eventId }) {
 
       await Bag.updateOne({ userId: order.userId }, { $set: { items: [] } }, { session });
 
+      const mailPayload = {
+        orderNumber: order.orderNumber,
+        email: order.customerEmail,
+        fullName: order.shippingAddress.fullName,
+        shippingAddress: order.shippingAddress,
+        items: order.items,
+        couponCode: order.couponCode,
+        subtotalInr: Math.round(order.subtotalPaise / 100),
+        discountInr: Math.round((order.discountPaise || 0) / 100),
+        gstInr: Math.round(order.gstPaise / 100),
+        totalInr: Math.round(order.totalPaise / 100),
+        razorpayOrderId: order.razorpayOrderId,
+        razorpayPaymentId: order.razorpayPaymentId,
+        paidAt: order.paidAt,
+      };
+
       await Job.create(
         [
           {
             type: order.status === "PAID" ? "SEND_ORDER_CONFIRMATION" : "SEND_CONCIERGE_ALERT",
-            idempotencyKey: `order-mail-${order.orderNumber}`,
-            payload: {
-              orderNumber: order.orderNumber,
-              email: order.customerEmail,
-              fullName: order.shippingAddress.fullName,
-              totalInr: Math.round(order.totalPaise / 100),
-              items: order.items,
-            },
+            idempotencyKey: `order-user-mail-${order.orderNumber}`,
+            payload: mailPayload,
+          },
+          {
+            type: "SEND_ADMIN_ORDER_SUCCESS",
+            idempotencyKey: `order-admin-mail-${order.orderNumber}`,
+            payload: mailPayload,
           },
         ],
         { session }

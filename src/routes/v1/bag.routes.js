@@ -9,6 +9,8 @@ import {
   toggleWishlistItem,
 } from "../../controllers/bag.controller.js";
 
+import {blockAdminShopping} from "../../middlewares/auth.middleware.js";
+
 const router = Router();
 const validSizes = z.enum(["XS", "S", "M", "L", "XL", "Free Size"]);
 
@@ -28,7 +30,7 @@ const wishlistSchema = z.object({
   productId: z.string().min(1),
 });
 
-router.use(requireAuth);
+router.use(requireAuth, blockAdminShopping);
 
 router.get("/", getBag);
 router.post("/items", validate(addItemSchema), addBagItem);

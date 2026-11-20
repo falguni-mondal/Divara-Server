@@ -480,18 +480,19 @@ async function seed() {
   }
   console.log(`[Seed] Upserted ${SEED_POLICIES.length} detailed legal PolicyPages.`);
 
-  const adminEmail = "admin@divara.com";
-  const existingAdmin = await User.findOne({ email: adminEmail });
-  if (!existingAdmin) {
+  const superAdminEmail = "admin@divara.com";
+  const existingSuperAdmin = await User.findOne({ email: superAdminEmail });
+  if (!existingSuperAdmin) {
     const admin = new User({
-      email: adminEmail,
-      fullName: "DIVARA Admin",
-      role: "admin",
+      email: superAdminEmail,
+      notificationEmail: "byfalguni@gmail.com",
+      fullName: "DIVARA Super Admin",
+      role: "super_admin",
       authProvider: "local",
     });
-    await admin.setPassword("Admin@2026");
+    await admin.setPassword("SuperAdmin@2026!");
     await admin.save();
-    console.log(`[Seed] Created initial admin user: ${adminEmail} (change password immediately).`);
+    console.log(`[Seed] Created Super Admin: ${superAdminEmail} (OTP inbox: byfalguni@gmail.com).`);
   }
 
   await disconnectDatabase();

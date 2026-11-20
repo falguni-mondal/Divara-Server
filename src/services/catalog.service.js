@@ -25,9 +25,50 @@ function buildSortStage(sortKey) {
 }
 
 /**
- * Single-stage MongoDB $facet aggregation powering /collections multi-facet filtering,
- * dual-thumb price slider, sorting, pagination, and live facet counts (zero Redis).
+ * Builds a comprehensive multi-word MongoDB query matching all relevant product fields:
+ * title, slug, category, categoryLabel, season, fabric, color, description,
+ * craftNotes, variants.sku, variants.size, and numeric price.
  */
+function buildComprehensiveSearchFilter(rawQuery) {
+  const clean = String(rawQuery || "").trim();
+  if (!clean) return null;
+
+  const tokens = clean
+    .split(/\s+/)
+    .map((t) => t.trim())
+    .filter(Boolean)
+    .slice(0, 6);
+
+  if (tokens.length === 0) return null;
+
+  const tokenClauses = tokens.map((token) => {
+    const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const rx = new RegExp(escaped, "i");
+    const orList = [
+      { title: rx },
+      { slug: rx },
+      { category: rx },
+      { categoryLabel: rx },
+      { season: rx },
+      { fabric: rx },
+      { color: rx },
+      { description: rx },
+      { craftNotes: rx },
+      { "variants.sku": rx },
+      { "variants.size": rx },
+    ];
+
+    const numeric = Number(token.replace(/[₹,]/g, ""));
+    if (!Number.isNaN(numeric) && numeric >= 1000 && numeric <= 500000) {
+      orList.push({ price: { $gte: numeric - 2500, $lte: numeric + 2500 } });
+    }
+
+    return { $or: orList };
+  });
+
+  return tokenClauses.length === 1 ? tokenClauses[0] : { $and: tokenClauses };
+}
+
 export async function queryCatalog(queryParams) {
   const cacheKey = `catalog:list:${JSON.stringify(queryParams)}`;
   const cached = appCache.get(cacheKey);
@@ -58,16 +99,9 @@ export async function queryCatalog(queryParams) {
     match.variants = { $elemMatch: { size: { $in: sizes } } };
   }
 
-  if (search) {
-    const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const rx = new RegExp(escaped, "i");
-    match.$or = [
-      { title: rx },
-      { categoryLabel: rx },
-      { season: rx },
-      { fabric: rx },
-      { color: rx },
-    ];
+  const searchClause = buildComprehensiveSearchFilter(search);
+  if (searchClause) {
+    Object.assign(match, searchClause);
   }
 
   const [aggResult] = await Product.aggregate([
@@ -148,18 +182,10 @@ export async function instantSearchCatalog(q, limit = 8) {
   const cached = appCache.get(cacheKey);
   if (cached) return cached;
 
-  const escaped = clean.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const rx = new RegExp(escaped, "i");
-
+  const searchClause = buildComprehensiveSearchFilter(clean);
   const filter = {
     isActive: true,
-    $or: [
-      { title: rx },
-      { categoryLabel: rx },
-      { season: rx },
-      { fabric: rx },
-      { color: rx },
-    ],
+    ...(searchClause || {}),
   };
 
   const [docs, totalMatches] = await Promise.all([

@@ -9,6 +9,8 @@ import {
   deleteMyReview,
   adminSeedReviews,
   adminDeleteReview,
+  addReviewReply,
+  deleteReviewReply,
 } from "../../controllers/review.controller.js";
 
 const router = Router();
@@ -23,6 +25,11 @@ const createReviewSchema = z.object({
   title: z.string().trim().min(3).max(140),
   comment: z.string().trim().min(10).max(2000),
   images: z.array(imageItemSchema).max(3, "Maximum 3 images allowed").optional().default([]),
+});
+
+const replySchema = z.object({
+  comment: z.string().trim().min(2).max(1500),
+  parentReplyId: z.string().nullable().optional().default(null),
 });
 
 const adminSeedSchema = z.object({
@@ -47,9 +54,11 @@ const adminSeedSchema = z.object({
 router.post("/admin/seed", requireAuth, requireAdmin, validate(adminSeedSchema), adminSeedReviews);
 router.delete("/admin/:reviewId", requireAuth, requireAdmin, adminDeleteReview);
 
-// Customer review endpoints
+// Customer reviews & infinite nested replies
 router.get("/:slug", listProductReviews);
 router.post("/:slug", requireAuth, formRateLimiter, validate(createReviewSchema), createProductReview);
 router.delete("/item/:reviewId", requireAuth, deleteMyReview);
+router.post("/:reviewId/replies", requireAuth, formRateLimiter, validate(replySchema), addReviewReply);
+router.delete("/:reviewId/replies/:replyId", requireAuth, deleteReviewReply);
 
 export default router;

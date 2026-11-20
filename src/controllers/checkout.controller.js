@@ -10,6 +10,7 @@ export async function startCheckout(req, res) {
   const data = await createCheckoutSession(req, {
     shippingAddress: req.body.shippingAddress,
     couponCode: req.body.couponCode || null,
+    attribution: req.body.attribution || null,
   });
   return sendSuccess(res, { statusCode: 201, data });
 }

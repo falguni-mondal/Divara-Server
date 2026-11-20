@@ -8,6 +8,8 @@ export const COOKIE_NAMES = Object.freeze({
   REFRESH: "divara_rt",
 });
 
+export const ADMIN_ROLES = new Set(["admin", "super_admin"]);
+
 export function getCookieOptions(maxAgeMs) {
   const isProd = env.NODE_ENV === "production";
   return {
@@ -58,8 +60,28 @@ export async function requireAuth(req, _res, next) {
 }
 
 export function requireAdmin(req, _res, next) {
-  if (!req.user || req.user.role !== "admin") {
+  if (!req.user || !ADMIN_ROLES.has(req.user.role)) {
     return next(ApiError.forbidden("Admin privileges are required"));
+  }
+  return next();
+}
+
+export function requireSuperAdmin(req, _res, next) {
+  if (
+    !req.user ||
+    req.user.role !== "super_admin" ||
+    req.user.email.toLowerCase() !== "admin@divara.com"
+  ) {
+    return next(ApiError.forbidden("Only the Super Admin (admin@divara.com) can access this action"));
+  }
+  return next();
+}
+
+export function blockAdminShopping(req, _res, next) {
+  if (req.user && ADMIN_ROLES.has(req.user.role)) {
+    return next(
+      ApiError.forbidden("Shopping bag and checkout actions are disabled for Admin accounts")
+    );
   }
   return next();
 }

@@ -34,7 +34,8 @@ const envSchema = z.object({
   RAZORPAY_WEBHOOK_SECRET: z.string().optional().default(""),
 
   RESEND_API_KEY: z.string().optional().default(""),
-  MAIL_FROM: z.string().default("DIVARA Atelier <support@divara.byfalguni.com>"),
+  MAIL_FROM: z.string().default("DIVARA Atelier <divara@byfalguni.com>"),
+  ADMIN_NOTIFICATION_EMAIL: z.string().email().default("byfalguni@gmail.com"),
 });
 
 const parsed = envSchema.safeParse(process.env);

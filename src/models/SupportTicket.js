@@ -1,11 +1,54 @@
 import mongoose from "mongoose";
 
+const ticketReplySchema = new mongoose.Schema(
+  {
+    // Null = direct reply to the ticket; ObjectId = nested reply-to-reply
+    parentReplyId: {
+      type: mongoose.Schema.Types.ObjectId,
+      default: null,
+    },
+    authorRole: {
+      type: String,
+      enum: ["admin", "user"],
+      required: true,
+    },
+    authorName: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: 100,
+    },
+    authorId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
+    message: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: 3000,
+    },
+    createdAt: {
+      type: Date,
+      default: Date.now,
+    },
+  },
+  { _id: true }
+);
+
 const supportTicketSchema = new mongoose.Schema(
   {
     ticketNumber: {
       type: String,
       required: true,
       unique: true,
+      index: true,
+    },
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
       index: true,
     },
     name: {
@@ -44,6 +87,10 @@ const supportTicketSchema = new mongoose.Schema(
       default: "OPEN",
       index: true,
     },
+    replies: {
+      type: [ticketReplySchema],
+      default: [],
+    },
     adminNotes: {
       type: String,
       default: "",
@@ -53,5 +100,6 @@ const supportTicketSchema = new mongoose.Schema(
 );
 
 supportTicketSchema.index({ status: 1, createdAt: -1 });
+supportTicketSchema.index({ email: 1, createdAt: -1 });
 
 export const SupportTicket = mongoose.model("SupportTicket", supportTicketSchema);
