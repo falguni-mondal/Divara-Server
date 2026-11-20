@@ -30,6 +30,16 @@ import {
   superAdminToggleAdmin,
   superAdminDeleteAdmin,
 } from "../../controllers/admin.controller.js";
+import {
+  adminListUsers,
+  adminGetUserDetail,
+  adminCreateUser,
+  adminUpdateUser,
+  adminToggleUserBan,
+  adminRevokeUserSessions,
+  adminClearUserCart,
+  adminDeleteUser,
+} from "../../controllers/adminUsers.controller.js";
 
 const router = Router();
 
@@ -66,6 +76,18 @@ const createAdminSchema = z.object({
   email: z.string().email("Valid login email required"),
   notificationEmail: z.string().email("Valid OTP inbox email required").optional(),
   password: z.string().min(8, "Password must be at least 8 characters").max(128),
+});
+
+const createCustomerSchema = z.object({
+  fullName: z.string().trim().min(2).max(100),
+  email: z.string().email("Valid email required"),
+  phone: z.string().trim().max(24).optional().default(""),
+  password: z.string().min(8, "Password must be at least 8 characters").max(128),
+});
+
+const updateCustomerSchema = z.object({
+  fullName: z.string().trim().min(2).max(100).optional(),
+  phone: z.string().trim().max(24).optional(),
 });
 
 const createUtmLinkSchema = z.object({
@@ -108,6 +130,16 @@ router.get("/orders", adminListOrders);
 router.patch("/orders/:orderId/status", validate(orderStatusSchema), adminUpdateOrderStatus);
 router.patch("/orders/:orderId/return", validate(reviewReturnSchema), adminReviewReturn);
 router.post("/orders/:orderId/refund", validate(refundOrderSchema), adminRefundOrder);
+
+// Customer User Manager
+router.get("/users", adminListUsers);
+router.post("/users", validate(createCustomerSchema), adminCreateUser);
+router.get("/users/:userId", adminGetUserDetail);
+router.patch("/users/:userId", validate(updateCustomerSchema), adminUpdateUser);
+router.patch("/users/:userId/toggle-ban", adminToggleUserBan);
+router.post("/users/:userId/revoke-sessions", adminRevokeUserSessions);
+router.delete("/users/:userId/cart", adminClearUserCart);
+router.delete("/users/:userId", adminDeleteUser);
 
 router.put("/cms/site-content", adminUpdateSiteContent);
 router.put("/policies/:slug", adminUpdatePolicy);
