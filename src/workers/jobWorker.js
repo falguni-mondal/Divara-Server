@@ -9,6 +9,11 @@ const SITE_URL = env.CLIENT_ORIGIN.replace(/\/$/, "");
 const ADMIN_EMAIL = env.ADMIN_NOTIFICATION_EMAIL;
 const MAX_JOBS_PER_TICK = 10;
 const STALE_LOCK_MS = 5 * 60 * 1000;
+const SEND_THROTTLE_MS = 650;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function escapeHtml(val) {
   return String(val ?? "")
@@ -297,7 +302,6 @@ async function pollNextJobs() {
   isProcessing = true;
 
   try {
-    // Recover any jobs orphaned in PROCESSING state by a previous crash
     await Job.updateMany(
       {
         status: "PROCESSING",
@@ -326,6 +330,10 @@ async function pollNextJobs() {
         job.completedAt = new Date();
         await job.save();
       } catch (err) {
+        console.error(
+          `[JobWorker] Job ${job._id} (${job.type}) failed (attempt ${job.attempts}/${job.maxAttempts}):`,
+          err.message
+        );
         job.lastError = err.message;
         if (job.attempts >= job.maxAttempts) {
           job.status = "FAILED";
@@ -335,6 +343,9 @@ async function pollNextJobs() {
         }
         await job.save();
       }
+
+      // Respect Resend's 2 req/sec rate limit when draining multiple queued emails
+      await sleep(SEND_THROTTLE_MS);
     }
   } catch (pollErr) {
     console.error("[JobWorker] Poll error:", pollErr.message);

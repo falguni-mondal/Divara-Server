@@ -12,8 +12,8 @@ export function getResend() {
 }
 
 /**
- * Sends a transactional email via Resend with optional Idempotency-Key
- * to prevent duplicate deliveries during background job retries.
+ * Sends a transactional email via Resend v4 SDK with proper idempotencyKey option
+ * and explicit Render-visible logging on success or failure.
  */
 export async function sendEmail({ to, subject, html, replyTo, idempotencyKey }) {
   const client = getResend();
@@ -23,9 +23,7 @@ export async function sendEmail({ to, subject, html, replyTo, idempotencyKey }) 
     return { skipped: true };
   }
 
-  const options = idempotencyKey
-    ? { headers: { "Idempotency-Key": idempotencyKey } }
-    : undefined;
+  const options = idempotencyKey ? { idempotencyKey: String(idempotencyKey).slice(0, 256) } : undefined;
 
   const { data, error } = await client.emails.send(
     {
@@ -39,8 +37,10 @@ export async function sendEmail({ to, subject, html, replyTo, idempotencyKey }) 
   );
 
   if (error) {
+    console.error(`[Resend] Failed to send email from="${env.MAIL_FROM}" to="${to}":`, error);
     throw new Error(`Resend API error: ${error.message || JSON.stringify(error)}`);
   }
 
+  console.log(`[Resend] Sent email id=${data?.id} to="${to}" subject="${subject}"`);
   return data;
 }
