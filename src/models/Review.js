@@ -10,7 +10,6 @@ const reviewImageSchema = new mongoose.Schema(
 
 const reviewReplySchema = new mongoose.Schema(
   {
-    // Null = direct reply to the review; ObjectId = nested reply-to-reply
     parentReplyId: {
       type: mongoose.Schema.Types.ObjectId,
       default: null,
@@ -113,7 +112,7 @@ const reviewSchema = new mongoose.Schema(
     status: {
       type: String,
       enum: ["PUBLISHED", "PENDING", "HIDDEN"],
-      default: "PUBLISHED",
+      default: "PENDING",
       index: true,
     },
   },

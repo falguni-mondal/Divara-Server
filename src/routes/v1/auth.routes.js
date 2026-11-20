@@ -8,6 +8,7 @@ import { authRateLimiter } from "../../middlewares/rateLimit.middleware.js";
 import {
   identifyEmail,
   emailPasswordContinue,
+  requestSuperAdminEmailOtp,
   verifyEmailOtp,
   verifySuperAdminTotp,
   googleCallback,
@@ -15,6 +16,12 @@ import {
   logout,
   getMe,
 } from "../../controllers/auth.controller.js";
+import {
+  listMyAddresses,
+  addMyAddress,
+  updateMyAddress,
+  deleteMyAddress,
+} from "../../controllers/address.controller.js";
 
 const router = Router();
 
@@ -39,13 +46,38 @@ const verifyTotpSchema = z.object({
   code: z.string().regex(/^\d{6}$/, "Authenticator code must be 6 digits"),
 });
 
+const addressSchema = z.object({
+  label: z.string().trim().min(1).max(40).optional().default("Home"),
+  fullName: z.string().trim().min(2).max(120),
+  phone: z.string().trim().min(10).max(20),
+  line1: z.string().trim().min(4).max(200),
+  line2: z.string().trim().max(200).optional().default(""),
+  city: z.string().trim().min(2).max(80),
+  state: z.string().trim().min(2).max(80),
+  postalCode: z.string().trim().min(5).max(12),
+  country: z.string().trim().default("India"),
+  isDefault: z.boolean().optional().default(false),
+});
+
 router.post("/identify", authRateLimiter, validate(identifySchema), identifyEmail);
 router.post("/continue", authRateLimiter, validate(continueSchema), emailPasswordContinue);
+router.post(
+  "/super-admin-email-otp",
+  authRateLimiter,
+  validate(continueSchema),
+  requestSuperAdminEmailOtp
+);
 router.post("/verify-otp", authRateLimiter, validate(verifyOtpSchema), verifyEmailOtp);
 router.post("/verify-totp", authRateLimiter, validate(verifyTotpSchema), verifySuperAdminTotp);
 router.post("/refresh", authRateLimiter, refreshSession);
 router.post("/logout", optionalAuth, logout);
 router.get("/me", requireAuth, getMe);
+
+// Customer Saved Addresses Manager
+router.get("/addresses", requireAuth, listMyAddresses);
+router.post("/addresses", requireAuth, validate(addressSchema), addMyAddress);
+router.patch("/addresses/:addressId", requireAuth, validate(addressSchema.partial()), updateMyAddress);
+router.delete("/addresses/:addressId", requireAuth, deleteMyAddress);
 
 router.get(
   "/google",

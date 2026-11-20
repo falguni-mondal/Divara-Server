@@ -14,9 +14,14 @@ import {
   adminListProducts,
   adminCreateProduct,
   adminUpdateProduct,
+  adminToggleProductActive,
+  adminReorderProducts,
+  adminAdjustProductStock,
   adminDeleteProduct,
   adminListOrders,
   adminUpdateOrderStatus,
+  adminReviewReturn,
+  adminRefundOrder,
   adminUpdateSiteContent,
   adminUpdatePolicy,
   adminListLogs,
@@ -35,12 +40,25 @@ const orderStatusSchema = z.object({
     "PROCESSING",
     "SHIPPED",
     "DELIVERED",
+    "RETURN_REQUESTED",
+    "RETURN_APPROVED",
+    "RETURN_REJECTED",
     "CANCELLED",
     "CONCIERGE_REVIEW",
     "REFUNDED",
   ]),
   trackingNumber: z.string().trim().max(120).optional(),
   courierName: z.string().trim().max(120).optional(),
+});
+
+const reviewReturnSchema = z.object({
+  decision: z.enum(["APPROVE", "REJECT"]),
+  adminNote: z.string().trim().max(500).optional().default(""),
+});
+
+const refundOrderSchema = z.object({
+  reason: z.string().trim().max(300).optional().default("Refund approved by DIVARA Atelier"),
+  restock: z.boolean().optional().default(true),
 });
 
 const createAdminSchema = z.object({
@@ -60,34 +78,42 @@ const createUtmLinkSchema = z.object({
   referralPerson: z.string().trim().max(100).optional().default(""),
 });
 
+const reorderProductsSchema = z.object({
+  orderedIds: z.array(z.string().min(12)).min(1),
+});
+
+const adjustStockSchema = z.object({
+  size: z.enum(["XS", "S", "M", "L", "XL", "Free Size"]),
+  delta: z.number().int().min(-500).max(500).optional(),
+  stockOnHand: z.number().int().min(0).max(10000).optional(),
+});
+
 router.use(requireAuth, requireAdmin);
 
-// Dashboard Telemetry
 router.get("/overview", getAdminOverview);
 
-// UTM & Referral URL Generator
 router.get("/utm-links", adminListUtmLinks);
 router.post("/utm-links", validate(createUtmLinkSchema), adminCreateUtmLink);
 router.delete("/utm-links/:linkId", adminDeleteUtmLink);
 
-// Products CRUD
 router.get("/products", adminListProducts);
 router.post("/products", adminCreateProduct);
+router.patch("/products/reorder", validate(reorderProductsSchema), adminReorderProducts);
 router.patch("/products/:productId", adminUpdateProduct);
+router.patch("/products/:productId/toggle-active", adminToggleProductActive);
+router.patch("/products/:productId/stock", validate(adjustStockSchema), adminAdjustProductStock);
 router.delete("/products/:productId", adminDeleteProduct);
 
-// Orders
 router.get("/orders", adminListOrders);
 router.patch("/orders/:orderId/status", validate(orderStatusSchema), adminUpdateOrderStatus);
+router.patch("/orders/:orderId/return", validate(reviewReturnSchema), adminReviewReturn);
+router.post("/orders/:orderId/refund", validate(refundOrderSchema), adminRefundOrder);
 
-// CMS & Policies
 router.put("/cms/site-content", adminUpdateSiteContent);
 router.put("/policies/:slug", adminUpdatePolicy);
 
-// Audit Logs
 router.get("/logs", adminListLogs);
 
-// Super Admin Only Team Management (strictly admin@divara.com)
 router.get("/team", requireSuperAdmin, superAdminListAdmins);
 router.post("/team", requireSuperAdmin, validate(createAdminSchema), superAdminCreateAdmin);
 router.patch("/team/:adminId/toggle", requireSuperAdmin, superAdminToggleAdmin);

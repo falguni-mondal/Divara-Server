@@ -1,3 +1,8 @@
+import mongoose from "mongoose";
+import {
+  restoreOrderStockInSession,
+  executeOrderRefundAndRestock,
+} from "../services/checkout.service.js";
 import { User } from "../models/User.js";
 import { Product } from "../models/Product.js";
 import { Order } from "../models/Order.js";
@@ -19,6 +24,61 @@ import { ApiError } from "../utils/apiError.js";
 
 const PAID_STATUSES = ["PAID", "PROCESSING", "SHIPPED", "DELIVERED"];
 
+const CATEGORY_LABELS = {
+  saree: "Sarees",
+  dress: "Dresses",
+  denim: "Denim",
+  shirt: "Shirts",
+};
+
+const PRODUCT_ALLOWED_FIELDS = [
+  "title",
+  "slug",
+  "category",
+  "categoryLabel",
+  "season",
+  "fabric",
+  "color",
+  "colorHex",
+  "price",
+  "description",
+  "craftNotes",
+  "variants",
+  "galleryMedia",
+  "isActive",
+  "isFeatured",
+  "sortOrder",
+];
+
+const CMS_ALLOWED_FIELDS = [
+  "hero",
+  "categories",
+  "collectionBanner",
+  "philosophy",
+  "luxuryPillars",
+  "contact",
+  "trendingSearches",
+];
+
+const POLICY_ALLOWED_FIELDS = ["title", "summary", "effectiveDate", "sections"];
+
+function pickFields(source, allowedKeys) {
+  const out = {};
+  for (const key of allowedKeys) {
+    if (source && Object.prototype.hasOwnProperty.call(source, key) && source[key] !== undefined) {
+      out[key] = source[key];
+    }
+  }
+  return out;
+}
+
+function escapeRegex(value, maxLen = 100) {
+  return String(value || "")
+    .trim()
+    .slice(0, maxLen)
+    .replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function slugifyUtm(value) {
   return String(value || "")
     .trim()
@@ -27,10 +87,33 @@ function slugifyUtm(value) {
     .replace(/[^a-z0-9._-]/g, "");
 }
 
-// --- 1. Rich Dashboard Overview KPIs, Traffic & Attribution Telemetry ---
+function parseDateRange(fromStr, toStr, fallbackDays = 30) {
+  const now = new Date();
+  let end = toStr ? new Date(`${toStr}T23:59:59.999Z`) : now;
+  if (Number.isNaN(end.getTime())) end = now;
+
+  let start = fromStr
+    ? new Date(`${fromStr}T00:00:00.000Z`)
+    : new Date(end.getTime() - (fallbackDays - 1) * 24 * 60 * 60 * 1000);
+  if (Number.isNaN(start.getTime())) {
+    start = new Date(end.getTime() - (fallbackDays - 1) * 24 * 60 * 60 * 1000);
+  }
+
+  if (start > end) {
+    const tmp = start;
+    start = end;
+    end = tmp;
+  }
+
+  const daySpan = Math.max(1, Math.min(365, Math.ceil((end - start) / (24 * 60 * 60 * 1000)) + 1));
+  return { start, end, daySpan };
+}
+
+// --- 1. Rich Dashboard Overview KPIs, Smart Date Range & Attribution Telemetry ---
 export async function getAdminOverview(req, res) {
-  const days = Math.min(90, Math.max(7, Number(req.query.days) || 30));
-  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  const fallbackDays = Math.min(365, Math.max(1, Number(req.query.days) || 30));
+  const { start, end, daySpan } = parseDateRange(req.query.from, req.query.to, fallbackDays);
+  const dateFilter = { createdAt: { $gte: start, $lte: end } };
 
   const [
     activeProducts,
@@ -38,6 +121,7 @@ export async function getAdminOverview(req, res) {
     customerCount,
     newsletterCount,
     reviewCount,
+    pendingReviews,
     orderStats,
     recentOrders,
     topProductsAgg,
@@ -54,9 +138,11 @@ export async function getAdminOverview(req, res) {
     Product.countDocuments({ isActive: true }),
     SupportTicket.countDocuments({ status: { $ne: "RESOLVED" } }),
     User.countDocuments({ role: "customer" }),
-    Newsletter.countDocuments({ status: "SUBSCRIBED" }),
-    Review.countDocuments({ isApproved: true }),
+    Newsletter.countDocuments({ isSubscribed: true }),
+    Review.countDocuments({ status: "PUBLISHED" }),
+    Review.countDocuments({ status: "PENDING" }),
     Order.aggregate([
+      { $match: dateFilter },
       {
         $group: {
           _id: "$status",
@@ -66,9 +152,9 @@ export async function getAdminOverview(req, res) {
         },
       },
     ]),
-    Order.find().sort({ createdAt: -1 }).limit(8).lean(),
+    Order.find(dateFilter).sort({ createdAt: -1 }).limit(8).lean(),
     Order.aggregate([
-      { $match: { status: { $in: PAID_STATUSES } } },
+      { $match: { ...dateFilter, status: { $in: PAID_STATUSES } } },
       { $unwind: "$items" },
       {
         $group: {
@@ -85,7 +171,7 @@ export async function getAdminOverview(req, res) {
       { $limit: 6 },
     ]),
     Order.aggregate([
-      { $match: { status: { $in: PAID_STATUSES } } },
+      { $match: { ...dateFilter, status: { $in: PAID_STATUSES } } },
       { $unwind: "$items" },
       {
         $group: {
@@ -99,7 +185,7 @@ export async function getAdminOverview(req, res) {
       { $sort: { revenuePaise: -1 } },
     ]),
     Order.aggregate([
-      { $match: { status: { $in: PAID_STATUSES } } },
+      { $match: { ...dateFilter, status: { $in: PAID_STATUSES } } },
       { $group: { _id: "$userId", orderCount: { $sum: 1 } } },
       {
         $group: {
@@ -112,7 +198,7 @@ export async function getAdminOverview(req, res) {
       },
     ]),
     Order.aggregate([
-      { $match: { createdAt: { $gte: since }, status: { $in: PAID_STATUSES } } },
+      { $match: { ...dateFilter, status: { $in: PAID_STATUSES } } },
       {
         $group: {
           _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
@@ -123,7 +209,7 @@ export async function getAdminOverview(req, res) {
       { $sort: { _id: 1 } },
     ]),
     TrafficVisit.aggregate([
-      { $match: { createdAt: { $gte: since } } },
+      { $match: dateFilter },
       {
         $group: {
           _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
@@ -133,7 +219,7 @@ export async function getAdminOverview(req, res) {
       { $sort: { _id: 1 } },
     ]),
     TrafficVisit.aggregate([
-      { $match: { createdAt: { $gte: since } } },
+      { $match: dateFilter },
       {
         $group: {
           _id: null,
@@ -143,7 +229,7 @@ export async function getAdminOverview(req, res) {
       },
     ]),
     TrafficVisit.aggregate([
-      { $match: { createdAt: { $gte: since } } },
+      { $match: dateFilter },
       {
         $group: {
           _id: "$utmSource",
@@ -155,7 +241,7 @@ export async function getAdminOverview(req, res) {
       { $limit: 8 },
     ]),
     TrafficVisit.aggregate([
-      { $match: { createdAt: { $gte: since }, referralPerson: { $ne: "" } } },
+      { $match: { ...dateFilter, referralPerson: { $ne: "" } } },
       {
         $group: {
           _id: "$referralPerson",
@@ -167,16 +253,15 @@ export async function getAdminOverview(req, res) {
       { $limit: 10 },
     ]),
     TrafficVisit.aggregate([
-      { $match: { createdAt: { $gte: since } } },
+      { $match: dateFilter },
       { $group: { _id: "$deviceType", count: { $sum: 1 } } },
     ]),
     Product.find({ isActive: true }).select("title slug variants").lean(),
   ]);
 
-  // Order attribution by source & referral person
   const [sourceOrdersAgg, referralOrdersAgg] = await Promise.all([
     Order.aggregate([
-      { $match: { createdAt: { $gte: since }, status: { $in: PAID_STATUSES } } },
+      { $match: { ...dateFilter, status: { $in: PAID_STATUSES } } },
       {
         $group: {
           _id: { $ifNull: ["$attribution.utmSource", "direct"] },
@@ -188,7 +273,7 @@ export async function getAdminOverview(req, res) {
     Order.aggregate([
       {
         $match: {
-          createdAt: { $gte: since },
+          ...dateFilter,
           status: { $in: PAID_STATUSES },
           "attribution.referralPerson": { $nin: ["", null] },
         },
@@ -231,10 +316,10 @@ export async function getAdminOverview(req, res) {
   const repeatCustomerRate =
     totalBuyers > 0 ? Number(((repeatBuyers / totalBuyers) * 100).toFixed(1)) : 0;
 
-  // Merge daily orders + visits into unified trend series
   const trendMap = new Map();
-  for (let i = days - 1; i >= 0; i--) {
-    const d = new Date(Date.now() - i * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const chartDays = Math.min(90, daySpan);
+  for (let i = chartDays - 1; i >= 0; i--) {
+    const d = new Date(end.getTime() - i * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
     trendMap.set(d, { date: d.slice(5), visits: 0, orders: 0, revenueInr: 0 });
   }
   for (const row of dailyVisitsAgg) {
@@ -295,7 +380,11 @@ export async function getAdminOverview(req, res) {
 
   return sendSuccess(res, {
     data: {
-      days,
+      range: {
+        from: start.toISOString().slice(0, 10),
+        to: end.toISOString().slice(0, 10),
+        days: daySpan,
+      },
       kpis: {
         totalRevenueInr: Math.round(paidRevenuePaise / 100),
         aovInr,
@@ -312,6 +401,7 @@ export async function getAdminOverview(req, res) {
         customers: customerCount,
         newsletterSubscribers: newsletterCount,
         approvedReviews: reviewCount,
+        pendingReviews,
       },
       dailyTrend: Array.from(trendMap.values()),
       statusBreakdown: orderStats.map((s) => ({
@@ -343,7 +433,7 @@ export async function getAdminOverview(req, res) {
   });
 }
 
-// --- 2. UTM & Referral Link Registry (Generator + Live Attribution Metrics) ---
+// --- 2. UTM & Referral Link Registry ---
 export async function adminListUtmLinks(_req, res) {
   const links = await UtmLink.find().sort({ createdAt: -1 }).limit(100).lean();
 
@@ -359,6 +449,7 @@ export async function adminListUtmLinks(_req, res) {
       const orderFilter = {
         status: { $in: PAID_STATUSES },
         "attribution.utmSource": link.utmSource,
+        ...(link.utmMedium ? { "attribution.utmMedium": link.utmMedium } : {}),
         ...(link.utmCampaign ? { "attribution.utmCampaign": link.utmCampaign } : {}),
         ...(link.referralPerson ? { "attribution.referralPerson": link.referralPerson } : {}),
       };
@@ -467,14 +558,78 @@ export async function adminDeleteUtmLink(req, res) {
   return sendSuccess(res, { message: "UTM link deleted." });
 }
 
-// --- 3. Products CRUD (with ImageKit cleanup & Audit Logging) ---
-export async function adminListProducts(_req, res) {
-  const products = await Product.find().sort({ sortOrder: 1, createdAt: -1 }).lean();
-  return sendSuccess(res, { data: { products } });
+// --- 3. Products CRUD, Pagination, Drag-Drop Reorder & Quick Stock ---
+export async function adminListProducts(req, res) {
+  const exportAll = req.query.exportAll === "true" || req.query.all === "true";
+  const page = Math.max(1, Number(req.query.page) || 1);
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 15));
+  const q = String(req.query.q || "").trim();
+
+  const filter = {};
+  if (q) {
+    const rx = new RegExp(escapeRegex(q), "i");
+    filter.$or = [
+      { title: rx },
+      { slug: rx },
+      { categoryLabel: rx },
+      { fabric: rx },
+      { color: rx },
+      { "variants.sku": rx },
+    ];
+  }
+
+  if (exportAll) {
+    const products = await Product.find(filter).sort({ sortOrder: 1, createdAt: -1 }).lean();
+    return sendSuccess(res, {
+      data: {
+        products,
+        pagination: { page: 1, limit: products.length || 1, total: products.length, totalPages: 1 },
+      },
+    });
+  }
+
+  const [products, total] = await Promise.all([
+    Product.find(filter)
+      .sort({ sortOrder: 1, createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .lean(),
+    Product.countDocuments(filter),
+  ]);
+
+  return sendSuccess(res, {
+    data: {
+      products,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / limit)),
+      },
+    },
+  });
 }
 
 export async function adminCreateProduct(req, res) {
-  const product = await Product.create(req.body);
+  const safeBody = pickFields(req.body, PRODUCT_ALLOWED_FIELDS);
+  const gallery = Array.isArray(safeBody.galleryMedia) ? safeBody.galleryMedia : [];
+  if (gallery.length < 1 || gallery.length > 5) {
+    throw ApiError.badRequest("Each product must have between 1 and 5 images.");
+  }
+
+  if (safeBody.category && CATEGORY_LABELS[safeBody.category]) {
+    safeBody.categoryLabel = CATEGORY_LABELS[safeBody.category];
+  }
+
+  const maxSort = await Product.findOne().sort({ sortOrder: -1 }).select("sortOrder").lean();
+  const nextSortOrder = typeof maxSort?.sortOrder === "number" ? maxSort.sortOrder + 1 : 0;
+
+  const product = await Product.create({
+    ...safeBody,
+    imageMedia: gallery[0],
+    galleryMedia: gallery,
+    sortOrder: safeBody.sortOrder ?? nextSortOrder,
+  });
   appCache.invalidatePrefix("catalog:");
 
   await logAdminAction(req, {
@@ -488,12 +643,57 @@ export async function adminCreateProduct(req, res) {
 }
 
 export async function adminUpdateProduct(req, res) {
+  const existing = await Product.findById(req.params.productId);
+  if (!existing) throw ApiError.notFound("Product not found");
+
+  const payload = pickFields(req.body, PRODUCT_ALLOWED_FIELDS);
+
+  if (payload.category && CATEGORY_LABELS[payload.category]) {
+    payload.categoryLabel = CATEGORY_LABELS[payload.category];
+  }
+
+  if (Array.isArray(payload.galleryMedia)) {
+    if (payload.galleryMedia.length < 1 || payload.galleryMedia.length > 5) {
+      throw ApiError.badRequest("Each product must have between 1 and 5 images.");
+    }
+    payload.imageMedia = payload.galleryMedia[0];
+
+    const newFileIds = new Set(payload.galleryMedia.map((g) => g.fileId).filter(Boolean));
+    const oldFileIds = [
+      existing.imageMedia?.fileId,
+      ...(existing.galleryMedia || []).map((g) => g.fileId),
+    ].filter((id) => id && !newFileIds.has(id));
+
+    if (oldFileIds.length > 0) {
+      await Promise.allSettled(oldFileIds.map((id) => deleteImageKitFile(id)));
+    }
+  }
+
+  // Preserve active checkout stockReserved holds on existing sizes
+  if (Array.isArray(payload.variants)) {
+    const reservedBySize = new Map(
+      (existing.variants || []).map((v) => [v.size, v.stockReserved || 0])
+    );
+    payload.variants = payload.variants.map((v) => {
+      const held = reservedBySize.get(v.size) || 0;
+      const requestedStock = Math.max(0, Math.floor(Number(v.stockOnHand) || 0));
+      return {
+        ...v,
+        stockReserved: held,
+        stockOnHand: Math.max(held, requestedStock),
+      };
+    });
+  }
+
+  if (typeof payload.price === "number") {
+    payload.pricePaise = Math.round(payload.price * 100);
+  }
+
   const product = await Product.findByIdAndUpdate(
     req.params.productId,
-    { $set: req.body },
+    { $set: payload },
     { returnDocument: "after", runValidators: true }
   );
-  if (!product) throw ApiError.notFound("Product not found");
 
   appCache.invalidatePrefix("catalog:");
 
@@ -507,16 +707,117 @@ export async function adminUpdateProduct(req, res) {
   return sendSuccess(res, { message: "Product updated.", data: { product } });
 }
 
+export async function adminReorderProducts(req, res) {
+  const rawIds = Array.isArray(req.body.orderedIds) ? req.body.orderedIds : [];
+  const validIds = rawIds.filter((id) => mongoose.Types.ObjectId.isValid(id));
+
+  const ops = validIds.map((id, index) => ({
+    updateOne: {
+      filter: { _id: id },
+      update: { $set: { sortOrder: index } },
+    },
+  }));
+
+  if (ops.length > 0) {
+    await Product.bulkWrite(ops);
+  }
+  appCache.invalidatePrefix("catalog:");
+
+  await logAdminAction(req, {
+    action: "PRODUCTS_REORDERED",
+    targetType: "product",
+    targetId: "catalog",
+    summary: `Reordered ${validIds.length} products in storefront display order.`,
+  });
+
+  return sendSuccess(res, { message: "Product display order saved." });
+}
+
+export async function adminAdjustProductStock(req, res) {
+  const { size, delta, stockOnHand } = req.body;
+  const product = await Product.findById(req.params.productId);
+  if (!product) throw ApiError.notFound("Product not found");
+
+  const variant = product.variants.find((v) => v.size === size);
+  if (!variant) throw ApiError.notFound(`Size "${size}" not found on this product`);
+
+  const prevStock = variant.stockOnHand;
+  let nextStock = prevStock;
+
+  if (typeof stockOnHand === "number") {
+    nextStock = Math.max(variant.stockReserved, Math.floor(stockOnHand));
+  } else if (typeof delta === "number") {
+    nextStock = Math.max(variant.stockReserved, prevStock + delta);
+  }
+
+  variant.stockOnHand = nextStock;
+  await product.save();
+  appCache.invalidatePrefix("catalog:");
+
+  await logAdminAction(req, {
+    action: "STOCK_ADJUSTED",
+    targetType: "product",
+    targetId: product._id,
+    summary: `Adjusted stock for "${product.title}" (${size}): ${prevStock} → ${nextStock}.`,
+  });
+
+  return sendSuccess(res, {
+    message: "Stock updated.",
+    data: { product },
+  });
+}
+
+export async function adminToggleProductActive(req, res) {
+  const product = await Product.findById(req.params.productId);
+  if (!product) throw ApiError.notFound("Product not found");
+
+  product.isActive = !product.isActive;
+  await product.save();
+  appCache.invalidatePrefix("catalog:");
+
+  await logAdminAction(req, {
+    action: "PRODUCT_VISIBILITY_TOGGLED",
+    targetType: "product",
+    targetId: product._id,
+    summary: `Set product "${product.title}" visibility to ${product.isActive ? "Active" : "Draft (Hidden)"}.`,
+  });
+
+  return sendSuccess(res, {
+    message: `"${product.title}" is now ${product.isActive ? "Active" : "Draft (Hidden)"}.`,
+    data: { product },
+  });
+}
+
 export async function adminDeleteProduct(req, res) {
   const product = await Product.findById(req.params.productId);
   if (!product) throw ApiError.notFound("Product not found");
+
+  // Protect historical order records: never hard-delete a product that was ordered in the past
+  const hasOrderRecord = await Order.exists({ "items.productId": product._id });
+  if (hasOrderRecord) {
+    product.isActive = false;
+    await product.save();
+    appCache.invalidatePrefix("catalog:");
+
+    await logAdminAction(req, {
+      action: "PRODUCT_ARCHIVED",
+      targetType: "product",
+      targetId: product._id,
+      summary: `Hidden (Draft) "${product.title}" instead of deleting because past customer orders reference it.`,
+    });
+
+    return sendSuccess(res, {
+      message: `"${product.title}" has past customer order records, so it was hidden (Draft) instead of permanently deleted.`,
+      data: { archived: true, product },
+    });
+  }
 
   const fileIds = [
     product.imageMedia?.fileId,
     ...(product.galleryMedia || []).map((g) => g.fileId),
   ].filter(Boolean);
 
-  await Promise.all(fileIds.map((id) => deleteImageKitFile(id)));
+  await Promise.allSettled(fileIds.map((id) => deleteImageKitFile(id)));
   await Product.deleteOne({ _id: product._id });
   appCache.invalidatePrefix("catalog:");
 
@@ -524,62 +825,215 @@ export async function adminDeleteProduct(req, res) {
     action: "PRODUCT_DELETED",
     targetType: "product",
     targetId: product._id,
-    summary: `Deleted product "${product.title}" (${product.slug}).`,
+    summary: `Permanently deleted product "${product.title}" (${product.slug}).`,
   });
 
-  return sendSuccess(res, { message: "Product deleted." });
+  return sendSuccess(res, {
+    message: `"${product.title}" deleted permanently.`,
+    data: { archived: false },
+  });
 }
 
-// --- 4. Orders Management & Customer Status Email ---
+// --- 4. Orders Management with Smart Date Filter, Search, Pagination & Full Export ---
 export async function adminListOrders(req, res) {
-  const filter = req.query.status && req.query.status !== "ALL" ? { status: req.query.status } : {};
-  const orders = await Order.find(filter).sort({ createdAt: -1 }).limit(100).lean();
-  return sendSuccess(res, { data: { orders } });
+  const { status, from, to, q } = req.query;
+  const exportAll = req.query.exportAll === "true";
+  const page = Math.max(1, Number(req.query.page) || 1);
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 15));
+
+  const filter = {};
+  if (status && status !== "ALL") filter.status = status;
+
+  if (from || to) {
+    filter.createdAt = {};
+    if (from) {
+      const s = new Date(`${from}T00:00:00.000Z`);
+      if (!Number.isNaN(s.getTime())) filter.createdAt.$gte = s;
+    }
+    if (to) {
+      const e = new Date(`${to}T23:59:59.999Z`);
+      if (!Number.isNaN(e.getTime())) filter.createdAt.$lte = e;
+    }
+    if (Object.keys(filter.createdAt).length === 0) delete filter.createdAt;
+  }
+
+  if (q && String(q).trim()) {
+    const rx = new RegExp(escapeRegex(q), "i");
+    filter.$or = [
+      { orderNumber: rx },
+      { customerEmail: rx },
+      { "shippingAddress.fullName": rx },
+      { "shippingAddress.phone": rx },
+      { couponCode: rx },
+    ];
+  }
+
+  if (exportAll) {
+    const orders = await Order.find(filter).sort({ createdAt: -1 }).limit(5000).lean();
+    return sendSuccess(res, {
+      data: {
+        orders,
+        pagination: { page: 1, limit: orders.length || 1, total: orders.length, totalPages: 1 },
+      },
+    });
+  }
+
+  const [orders, total] = await Promise.all([
+    Order.find(filter)
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .lean(),
+    Order.countDocuments(filter),
+  ]);
+
+  return sendSuccess(res, {
+    data: {
+      orders,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / limit)),
+      },
+    },
+  });
 }
 
 export async function adminUpdateOrderStatus(req, res) {
   const { status, trackingNumber, courierName } = req.body;
-  const order = await Order.findByIdAndUpdate(
-    req.params.orderId,
-    {
-      $set: {
-        status,
-        ...(trackingNumber !== undefined ? { trackingNumber } : {}),
-        ...(courierName !== undefined ? { courierName } : {}),
-      },
-    },
-    { returnDocument: "after" }
-  );
+  const order = await Order.findById(req.params.orderId);
   if (!order) throw ApiError.notFound("Order not found");
+
+  if (status === "REFUNDED") {
+    throw ApiError.badRequest(
+      "Use the 'Issue Razorpay Refund' button in Order Details so the payment gateway refund is processed."
+    );
+  }
+
+  if (
+    ["REFUNDED", "CANCELLED"].includes(order.status) &&
+    ["PAID", "PROCESSING", "SHIPPED", "DELIVERED"].includes(status)
+  ) {
+    throw ApiError.badRequest(
+      `Cannot move a ${order.status} order back to ${status} because its stock has already been released.`
+    );
+  }
+
+  const session = await mongoose.startSession();
+  try {
+    await session.withTransaction(async () => {
+      const fresh = await Order.findById(order._id).session(session);
+      if (status === "CANCELLED") {
+        await restoreOrderStockInSession(fresh, session);
+        fresh.cancelledAt = new Date();
+      }
+      if (status === "SHIPPED" && !fresh.shippedAt) {
+        fresh.shippedAt = new Date();
+      }
+      if (status === "DELIVERED" && !fresh.deliveredAt) {
+        fresh.deliveredAt = new Date();
+      }
+      fresh.status = status;
+      if (trackingNumber !== undefined) fresh.trackingNumber = trackingNumber;
+      if (courierName !== undefined) fresh.courierName = courierName;
+      await fresh.save({ session });
+    });
+  } finally {
+    await session.endSession();
+  }
+
+  appCache.invalidatePrefix("catalog:");
+  const updated = await Order.findById(order._id).lean();
 
   await Job.create({
     type: "SEND_ORDER_STATUS_UPDATE",
-    idempotencyKey: `order-status-${order.orderNumber}-${status}-${Date.now()}`,
+    idempotencyKey: `order-status-${updated.orderNumber}-${status}-${Date.now()}`,
     payload: {
-      orderNumber: order.orderNumber,
-      email: order.customerEmail,
-      fullName: order.shippingAddress?.fullName || "Valued Client",
+      orderNumber: updated.orderNumber,
+      email: updated.customerEmail,
+      fullName: updated.shippingAddress?.fullName || "Valued Client",
       status,
-      trackingNumber: order.trackingNumber,
-      courierName: order.courierName,
+      trackingNumber: updated.trackingNumber,
+      courierName: updated.courierName,
     },
   });
 
   await logAdminAction(req, {
     action: "ORDER_STATUS_UPDATED",
     targetType: "order",
-    targetId: order._id,
-    summary: `Updated order ${order.orderNumber} status to ${status}.`,
+    targetId: updated._id,
+    summary: `Updated order ${updated.orderNumber} status to ${status}${updated.stockRestored ? " (inventory restocked)" : ""}.`,
   });
 
-  return sendSuccess(res, { message: `Order updated to ${status}.`, data: { order } });
+  return sendSuccess(res, { message: `Order updated to ${status}.`, data: { order: updated } });
+}
+
+export async function adminReviewReturn(req, res) {
+  const { decision, adminNote = "" } = req.body;
+  const order = await Order.findById(req.params.orderId);
+  if (!order) throw ApiError.notFound("Order not found");
+  if (order.status !== "RETURN_REQUESTED") {
+    throw ApiError.badRequest("This order does not have a pending return request.");
+  }
+
+  const nextStatus = decision === "APPROVE" ? "RETURN_APPROVED" : "RETURN_REJECTED";
+  order.status = nextStatus;
+  order.returnRequest = {
+    ...(order.returnRequest?.toObject ? order.returnRequest.toObject() : order.returnRequest || {}),
+    reviewedAt: new Date(),
+    reviewedBy: req.user.email,
+    adminNote: adminNote.trim(),
+  };
+  await order.save();
+
+  await Job.create({
+    type: "SEND_ORDER_STATUS_UPDATE",
+    idempotencyKey: `order-return-${nextStatus}-${order.orderNumber}-${Date.now()}`,
+    payload: {
+      orderNumber: order.orderNumber,
+      email: order.customerEmail,
+      fullName: order.shippingAddress?.fullName || "Valued Client",
+      status: nextStatus,
+    },
+  });
+
+  await logAdminAction(req, {
+    action: "ORDER_RETURN_REVIEWED",
+    targetType: "order",
+    targetId: order._id,
+    summary: `${decision === "APPROVE" ? "Approved" : "Rejected"} return for ${order.orderNumber}.`,
+  });
+
+  return sendSuccess(res, {
+    message: `Return ${decision === "APPROVE" ? "approved" : "rejected"}.`,
+    data: { order },
+  });
+}
+
+export async function adminRefundOrder(req, res) {
+  const { reason = "Refund approved by DIVARA Atelier", restock = true } = req.body;
+  const order = await executeOrderRefundAndRestock(req.params.orderId, { reason, restock });
+
+  await logAdminAction(req, {
+    action: "ORDER_REFUNDED",
+    targetType: "order",
+    targetId: order._id,
+    summary: `Refunded order ${order.orderNumber} (₹${Math.round(order.totalPaise / 100)})${restock ? " & restocked items" : ""}.`,
+  });
+
+  return sendSuccess(res, {
+    message: `Order ${order.orderNumber} refunded${restock ? " and restocked" : ""}.`,
+    data: { order },
+  });
 }
 
 // --- 5. CMS & Policy Pages Editor ---
 export async function adminUpdateSiteContent(req, res) {
+  const safeContent = pickFields(req.body, CMS_ALLOWED_FIELDS);
   const content = await SiteContent.findOneAndUpdate(
     { key: "global" },
-    { $set: req.body },
+    { $set: safeContent },
     { upsert: true, returnDocument: "after" }
   );
   appCache.invalidatePrefix("cms:");
@@ -596,9 +1050,10 @@ export async function adminUpdateSiteContent(req, res) {
 
 export async function adminUpdatePolicy(req, res) {
   const slug = req.params.slug.toLowerCase();
+  const safePolicy = pickFields(req.body, POLICY_ALLOWED_FIELDS);
   const policy = await PolicyPage.findOneAndUpdate(
     { slug },
-    { $set: req.body },
+    { $set: safePolicy },
     { returnDocument: "after", runValidators: true }
   );
   if (!policy) throw ApiError.notFound("Policy page not found");
@@ -615,20 +1070,39 @@ export async function adminUpdatePolicy(req, res) {
   return sendSuccess(res, { message: "Policy page updated.", data: { policy } });
 }
 
-// --- 6. Immutable Admin Audit Logs ---
+// --- 6. Immutable Admin Audit Logs (Paginated) ---
 export async function adminListLogs(req, res) {
-  const { email, action, status, limit = 100 } = req.query;
+  const { email, action, status } = req.query;
+  const page = Math.max(1, Number(req.query.page) || 1);
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 25));
+
   const filter = {};
-  if (email) filter.actorEmail = new RegExp(String(email).trim(), "i");
+  if (email && String(email).trim()) {
+    filter.actorEmail = new RegExp(escapeRegex(email, 100), "i");
+  }
   if (action && action !== "ALL") filter.action = action;
   if (status && status !== "ALL") filter.status = status;
 
-  const logs = await AdminLog.find(filter)
-    .sort({ createdAt: -1 })
-    .limit(Math.min(250, Number(limit) || 100))
-    .lean();
+  const [logs, total] = await Promise.all([
+    AdminLog.find(filter)
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .lean(),
+    AdminLog.countDocuments(filter),
+  ]);
 
-  return sendSuccess(res, { data: { logs } });
+  return sendSuccess(res, {
+    data: {
+      logs,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / limit)),
+      },
+    },
+  });
 }
 
 // --- 7. Super-Admin-Only Admin Management (Strictly admin@divara.com) ---

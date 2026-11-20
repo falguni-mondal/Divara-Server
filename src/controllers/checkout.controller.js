@@ -2,6 +2,10 @@ import { Order } from "../models/Order.js";
 import { sendSuccess } from "../utils/apiResponse.js";
 import {
   createCheckoutSession,
+  verifyRazorpayPayment,
+  recordClientPaymentFailure,
+  cancelCustomerOrder,
+  requestCustomerReturn,
   processRazorpayWebhook,
 } from "../services/checkout.service.js";
 import { ApiError } from "../utils/apiError.js";
@@ -13,6 +17,45 @@ export async function startCheckout(req, res) {
     attribution: req.body.attribution || null,
   });
   return sendSuccess(res, { statusCode: 201, data });
+}
+
+export async function verifyCheckoutPayment(req, res) {
+  const data = await verifyRazorpayPayment(req, {
+    razorpayOrderId: req.body.razorpayOrderId,
+    razorpayPaymentId: req.body.razorpayPaymentId,
+    razorpaySignature: req.body.razorpaySignature,
+  });
+  return sendSuccess(res, { message: "Payment verified and order confirmed.", data });
+}
+
+export async function reportCheckoutFailure(req, res) {
+  const data = await recordClientPaymentFailure(req, {
+    razorpayOrderId: req.body.razorpayOrderId,
+    razorpayPaymentId: req.body.razorpayPaymentId || null,
+    reason: req.body.reason,
+    code: req.body.code,
+  });
+  return sendSuccess(res, { data });
+}
+
+export async function cancelMyOrder(req, res) {
+  const order = await cancelCustomerOrder(
+    req,
+    req.params.orderNumber,
+    req.body.reason || "Cancelled by customer"
+  );
+  return sendSuccess(res, {
+    message: "Order cancelled and inventory restocked.",
+    data: { order },
+  });
+}
+
+export async function requestMyOrderReturn(req, res) {
+  const order = await requestCustomerReturn(req, req.params.orderNumber, req.body.reason);
+  return sendSuccess(res, {
+    message: "Return request submitted for Atelier review.",
+    data: { order },
+  });
 }
 
 export async function handleRazorpayWebhook(req, res) {
@@ -42,9 +85,6 @@ export async function getOrderByNumber(req, res) {
     userId: req.user._id,
   }).lean();
 
-  if (!order) {
-    throw ApiError.notFound("Order not found");
-  }
-
+  if (!order) throw ApiError.notFound("Order not found");
   return sendSuccess(res, { data: { order } });
 }

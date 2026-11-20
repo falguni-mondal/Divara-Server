@@ -47,6 +47,27 @@ const attributionSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const returnRequestSchema = new mongoose.Schema(
+  {
+    reason: { type: String, default: "", trim: true, maxlength: 500 },
+    requestedAt: { type: Date, default: null },
+    reviewedAt: { type: Date, default: null },
+    reviewedBy: { type: String, default: "" },
+    adminNote: { type: String, default: "", trim: true, maxlength: 500 },
+  },
+  { _id: false }
+);
+
+const refundSchema = new mongoose.Schema(
+  {
+    razorpayRefundId: { type: String, default: null },
+    amountPaise: { type: Number, default: 0 },
+    refundedAt: { type: Date, default: null },
+    reason: { type: String, default: "" },
+  },
+  { _id: false }
+);
+
 const orderSchema = new mongoose.Schema(
   {
     orderNumber: {
@@ -89,9 +110,21 @@ const orderSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
+    // CA-Ready Indian GST Accounting Fields (Final MRP is GST-Inclusive)
     subtotalPaise: { type: Number, required: true, min: 0 },
     discountPaise: { type: Number, default: 0, min: 0 },
+    taxableBasePaise: { type: Number, default: 0, min: 0 },
+    gstRatePercent: { type: Number, default: 12 },
+    taxType: {
+      type: String,
+      enum: ["CGST_SGST", "IGST"],
+      default: "IGST",
+    },
+    cgstPaise: { type: Number, default: 0, min: 0 },
+    sgstPaise: { type: Number, default: 0, min: 0 },
+    igstPaise: { type: Number, default: 0, min: 0 },
     gstPaise: { type: Number, required: true, min: 0 },
+    hsnCode: { type: String, default: "6204" },
     shippingPaise: { type: Number, default: 0, min: 0 },
     totalPaise: { type: Number, required: true, min: 0 },
     currency: { type: String, default: "INR" },
@@ -113,6 +146,9 @@ const orderSchema = new mongoose.Schema(
         "PROCESSING",
         "SHIPPED",
         "DELIVERED",
+        "RETURN_REQUESTED",
+        "RETURN_APPROVED",
+        "RETURN_REJECTED",
         "CANCELLED",
         "CONCIERGE_REVIEW",
         "REFUNDED",
@@ -121,6 +157,21 @@ const orderSchema = new mongoose.Schema(
       index: true,
     },
     paidAt: { type: Date, default: null },
+    deliveredAt: { type: Date, default: null },
+    cancelledAt: { type: Date, default: null },
+    cancelReason: { type: String, default: "", trim: true },
+    returnRequest: {
+      type: returnRequestSchema,
+      default: () => ({}),
+    },
+    refund: {
+      type: refundSchema,
+      default: () => ({}),
+    },
+    stockRestored: {
+      type: Boolean,
+      default: false,
+    },
     trackingNumber: { type: String, default: null },
     courierName: { type: String, default: null },
   },

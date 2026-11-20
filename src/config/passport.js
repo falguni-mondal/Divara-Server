@@ -2,10 +2,12 @@ import passport from "passport";
 import { Strategy as GoogleStrategy } from "passport-google-oauth20";
 import { env } from "./env.js";
 import { User } from "../models/User.js";
+import { ADMIN_ROLES } from "../middlewares/auth.middleware.js";
 
 /**
  * Configures stateless Passport.js Google OAuth 2.0 strategy (session: false).
- * Links existing email accounts automatically or creates a new DIVARA customer profile.
+ * Links existing active customer email accounts or creates a new customer profile.
+ * Blocks deactivated accounts and admin accounts (which require 2FA password login).
  */
 export function configurePassport() {
   if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET) {
@@ -35,6 +37,13 @@ export function configurePassport() {
           });
 
           if (user) {
+            if (!user.isActive) {
+              return done(null, false, { message: "ACCOUNT_DISABLED" });
+            }
+            // Do not mutate admin records; googleCallback will redirect with admin_2fa_required
+            if (ADMIN_ROLES.has(user.role)) {
+              return done(null, user);
+            }
             if (!user.googleId) user.googleId = profile.id;
             if (!user.fullName && fullName) user.fullName = fullName;
             if (!user.avatarUrl && avatarUrl) user.avatarUrl = avatarUrl;

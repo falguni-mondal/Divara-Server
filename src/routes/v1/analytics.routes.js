@@ -1,7 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
 import { validate } from "../../middlewares/validate.middleware.js";
-import { generalApiLimiter } from "../../middlewares/rateLimit.middleware.js";
 import { trackVisit } from "../../controllers/analytics.controller.js";
 
 const router = Router();
@@ -17,6 +16,6 @@ const trackSchema = z.object({
   referrerHost: z.string().trim().max(260).optional().default(""),
 });
 
-router.post("/track", generalApiLimiter, validate(trackSchema), trackVisit);
+router.post("/track", validate(trackSchema), trackVisit);
 
 export default router;

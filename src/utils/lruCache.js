@@ -1,6 +1,6 @@
 /**
  * Zero-Redis bounded in-process LRU Cache with per-entry TTL.
- * Used for hot catalog $facet queries, instant search prefixes, and CMS SiteContent reads.
+ * Used for hot catalog $facet queries, instant search prefixes, CMS reads, and TOTP attempt/replay guards.
  */
 export class InProcessLRUCache {
   constructor({ maxEntries = 500, defaultTtlMs = 120_000 } = {}) {
@@ -36,6 +36,10 @@ export class InProcessLRUCache {
       value,
       expiresAt: Date.now() + ttlMs,
     });
+  }
+
+  delete(key) {
+    return this.store.delete(key);
   }
 
   invalidatePrefix(prefix) {

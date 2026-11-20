@@ -24,11 +24,6 @@ function buildSortStage(sortKey) {
   }
 }
 
-/**
- * Builds a comprehensive multi-word MongoDB query matching all relevant product fields:
- * title, slug, category, categoryLabel, season, fabric, color, description,
- * craftNotes, variants.sku, variants.size, and numeric price.
- */
 function buildComprehensiveSearchFilter(rawQuery) {
   const clean = String(rawQuery || "").trim();
   if (!clean) return null;
@@ -69,27 +64,54 @@ function buildComprehensiveSearchFilter(rawQuery) {
   return tokenClauses.length === 1 ? tokenClauses[0] : { $and: tokenClauses };
 }
 
-export async function queryCatalog(queryParams) {
-  const cacheKey = `catalog:list:${JSON.stringify(queryParams)}`;
-  const cached = appCache.get(cacheKey);
-  if (cached) return cached;
-
+export async function queryCatalog(queryParams = {}) {
   const categories = parseCsvList(queryParams.category);
   const seasons = parseCsvList(queryParams.season);
   const colors = parseCsvList(queryParams.color);
   const fabrics = parseCsvList(queryParams.fabric);
   const sizes = parseCsvList(queryParams.size);
-  const minPrice = Number(queryParams.minPrice) || 10000;
-  const maxPrice = Number(queryParams.maxPrice) || 70000;
-  const search = (queryParams.q || "").trim();
-  const sort = queryParams.sort || "featured";
-  const page = Math.max(1, Number(queryParams.page) || 1);
-  const limit = Math.min(48, Math.max(1, Number(queryParams.limit) || 24));
 
-  const match = {
-    isActive: true,
-    price: { $gte: minPrice, $lte: maxPrice },
-  };
+  const hasMinPrice =
+    queryParams.minPrice !== undefined &&
+    queryParams.minPrice !== "" &&
+    !Number.isNaN(Number(queryParams.minPrice));
+  const hasMaxPrice =
+    queryParams.maxPrice !== undefined &&
+    queryParams.maxPrice !== "" &&
+    !Number.isNaN(Number(queryParams.maxPrice));
+
+  const minPrice = hasMinPrice ? Math.max(0, Number(queryParams.minPrice)) : null;
+  const maxPrice = hasMaxPrice ? Math.max(0, Number(queryParams.maxPrice)) : null;
+  const search = String(queryParams.q || "").trim();
+  const sort = String(queryParams.sort || "featured");
+  const page = Math.max(1, Number(queryParams.page) || 1);
+  const limit = Math.min(100, Math.max(1, Number(queryParams.limit) || 24));
+
+  // Deterministic cache key using only whitelisted catalog parameters
+  const cacheKey = `catalog:list:${JSON.stringify({
+    categories,
+    seasons,
+    colors,
+    fabrics,
+    sizes,
+    minPrice,
+    maxPrice,
+    search,
+    sort,
+    page,
+    limit,
+  })}`;
+
+  const cached = appCache.get(cacheKey);
+  if (cached) return cached;
+
+  const match = { isActive: true };
+
+  if (minPrice !== null || maxPrice !== null) {
+    match.price = {};
+    if (minPrice !== null) match.price.$gte = minPrice;
+    if (maxPrice !== null) match.price.$lte = maxPrice;
+  }
 
   if (categories.length > 0) match.category = { $in: categories };
   if (seasons.length > 0) match.season = { $in: seasons };
@@ -118,12 +140,22 @@ export async function queryCatalog(queryParams) {
         seasons: [{ $sortByCount: "$season" }],
         colors: [{ $sortByCount: "$color" }],
         fabrics: [{ $sortByCount: "$fabric" }],
+        priceStats: [
+          {
+            $group: {
+              _id: null,
+              min: { $min: "$price" },
+              max: { $max: "$price" },
+            },
+          },
+        ],
       },
     },
   ]);
 
   const total = aggResult?.totalCount?.[0]?.total || 0;
   const items = (aggResult?.items || []).map((doc) => Product.toFrontendDTO(doc));
+  const stats = aggResult?.priceStats?.[0];
 
   const result = {
     items,
@@ -132,7 +164,10 @@ export async function queryCatalog(queryParams) {
       seasons: aggResult?.seasons || [],
       colors: aggResult?.colors || [],
       fabrics: aggResult?.fabrics || [],
-      priceBounds: { min: 10000, max: 70000 },
+      priceBounds: {
+        min: stats?.min ?? 0,
+        max: stats?.max ?? 150000,
+      },
     },
     meta: {
       total,
@@ -147,11 +182,12 @@ export async function queryCatalog(queryParams) {
 }
 
 export async function getProductBySlug(slug) {
-  const cacheKey = `catalog:slug:${slug}`;
+  const cleanSlug = String(slug || "").toLowerCase().trim();
+  const cacheKey = `catalog:slug:${cleanSlug}`;
   const cached = appCache.get(cacheKey);
   if (cached) return cached;
 
-  const doc = await Product.findOne({ slug: slug.toLowerCase(), isActive: true }).lean();
+  const doc = await Product.findOne({ slug: cleanSlug, isActive: true }).lean();
   if (!doc) {
     throw ApiError.notFound("Garment not found in the DIVARA archive");
   }
@@ -178,7 +214,8 @@ export async function instantSearchCatalog(q, limit = 8) {
   const clean = (q || "").trim();
   if (!clean) return { matches: [], totalMatches: 0 };
 
-  const cacheKey = `catalog:search:${clean.toLowerCase()}:${limit}`;
+  const safeLimit = Math.min(24, Math.max(1, Number(limit) || 8));
+  const cacheKey = `catalog:search:${clean.toLowerCase()}:${safeLimit}`;
   const cached = appCache.get(cacheKey);
   if (cached) return cached;
 
@@ -189,7 +226,7 @@ export async function instantSearchCatalog(q, limit = 8) {
   };
 
   const [docs, totalMatches] = await Promise.all([
-    Product.find(filter).sort({ isFeatured: -1, sortOrder: 1 }).limit(limit).lean(),
+    Product.find(filter).sort({ isFeatured: -1, sortOrder: 1 }).limit(safeLimit).lean(),
     Product.countDocuments(filter),
   ]);
 

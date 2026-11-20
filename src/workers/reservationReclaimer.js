@@ -21,6 +21,8 @@ async function sweepExpiredReservations() {
 
     if (expiredHolds.length === 0) return;
 
+    let releasedCount = 0;
+
     for (const hold of expiredHolds) {
       const session = await mongoose.startSession();
       try {
@@ -34,7 +36,10 @@ async function sweepExpiredReservations() {
 
           for (const item of locked.items) {
             await Product.updateOne(
-              { _id: item.productId, "variants.size": item.size },
+              {
+                _id: item.productId,
+                variants: { $elemMatch: { size: item.size, stockReserved: { $gte: item.quantity } } },
+              },
               { $inc: { "variants.$.stockReserved": -item.quantity } },
               { session }
             );
@@ -42,7 +47,14 @@ async function sweepExpiredReservations() {
 
           await Order.updateOne(
             { _id: locked.orderId, status: "PENDING_PAYMENT" },
-            { $set: { status: "CANCELLED" } },
+            {
+              $set: {
+                status: "CANCELLED",
+                cancelledAt: new Date(),
+                cancelReason: "Checkout reservation expired (15m)",
+                stockRestored: true,
+              },
+            },
             { session }
           );
 
@@ -58,14 +70,20 @@ async function sweepExpiredReservations() {
               { session }
             );
           }
+
+          releasedCount += 1;
         });
+      } catch (holdErr) {
+        console.error(`[ReservationReclaimer] Failed hold ${hold._id}:`, holdErr.message);
       } finally {
         await session.endSession();
       }
     }
 
-    appCache.invalidatePrefix("catalog:");
-    console.log(`[ReservationReclaimer] Released ${expiredHolds.length} expired stock hold(s).`);
+    if (releasedCount > 0) {
+      appCache.invalidatePrefix("catalog:");
+      console.log(`[ReservationReclaimer] Released ${releasedCount} expired stock hold(s).`);
+    }
   } catch (error) {
     console.error("[ReservationReclaimer] Sweep error:", error.message);
   } finally {

@@ -4,6 +4,10 @@ import { requireAuth, blockAdminShopping } from "../../middlewares/auth.middlewa
 import { validate } from "../../middlewares/validate.middleware.js";
 import {
   startCheckout,
+  verifyCheckoutPayment,
+  reportCheckoutFailure,
+  cancelMyOrder,
+  requestMyOrderReturn,
   listMyOrders,
   getOrderByNumber,
 } from "../../controllers/checkout.controller.js";
@@ -36,10 +40,35 @@ const checkoutSchema = z.object({
   }),
 });
 
+const verifyPaymentSchema = z.object({
+  razorpayOrderId: z.string().min(5),
+  razorpayPaymentId: z.string().min(5),
+  razorpaySignature: z.string().min(10),
+});
+
+const reportFailureSchema = z.object({
+  razorpayOrderId: z.string().min(5),
+  razorpayPaymentId: z.string().nullable().optional(),
+  reason: z.string().max(300).optional(),
+  code: z.string().max(80).optional(),
+});
+
+const cancelOrderSchema = z.object({
+  reason: z.string().trim().max(300).optional().default("Cancelled by customer"),
+});
+
+const returnRequestSchema = z.object({
+  reason: z.string().trim().min(5, "Please describe the reason for return").max(500),
+});
+
 router.use(requireAuth, blockAdminShopping);
 
 router.post("/session", validate(checkoutSchema), startCheckout);
+router.post("/verify", validate(verifyPaymentSchema), verifyCheckoutPayment);
+router.post("/failure", validate(reportFailureSchema), reportCheckoutFailure);
 router.get("/orders", listMyOrders);
 router.get("/orders/:orderNumber", getOrderByNumber);
+router.post("/orders/:orderNumber/cancel", validate(cancelOrderSchema), cancelMyOrder);
+router.post("/orders/:orderNumber/return", validate(returnRequestSchema), requestMyOrderReturn);
 
 export default router;

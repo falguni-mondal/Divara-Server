@@ -1,12 +1,18 @@
 import { Router } from "express";
 import { z } from "zod";
-import { requireAuth, requireAdmin } from "../../middlewares/auth.middleware.js";
+import {
+  requireAuth,
+  optionalAuth,
+  requireAdmin,
+} from "../../middlewares/auth.middleware.js";
 import { validate } from "../../middlewares/validate.middleware.js";
 import { formRateLimiter } from "../../middlewares/rateLimit.middleware.js";
 import {
   listProductReviews,
   createProductReview,
   deleteMyReview,
+  adminListReviews,
+  adminUpdateReviewStatus,
   adminSeedReviews,
   adminDeleteReview,
   addReviewReply,
@@ -32,6 +38,10 @@ const replySchema = z.object({
   parentReplyId: z.string().nullable().optional().default(null),
 });
 
+const adminStatusSchema = z.object({
+  status: z.enum(["PUBLISHED", "PENDING", "HIDDEN"]),
+});
+
 const adminSeedSchema = z.object({
   productSlug: z.string().trim().min(1),
   reviews: z
@@ -50,12 +60,20 @@ const adminSeedSchema = z.object({
     .max(50),
 });
 
-// Admin Panel review seeding & moderation
+// Admin Panel review moderation & seeding
+router.get("/admin/list", requireAuth, requireAdmin, adminListReviews);
+router.patch(
+  "/admin/:reviewId/status",
+  requireAuth,
+  requireAdmin,
+  validate(adminStatusSchema),
+  adminUpdateReviewStatus
+);
 router.post("/admin/seed", requireAuth, requireAdmin, validate(adminSeedSchema), adminSeedReviews);
 router.delete("/admin/:reviewId", requireAuth, requireAdmin, adminDeleteReview);
 
-// Customer reviews & infinite nested replies
-router.get("/:slug", listProductReviews);
+// Customer reviews & infinite nested replies (optionalAuth lets authors see their own PENDING review)
+router.get("/:slug", optionalAuth, listProductReviews);
 router.post("/:slug", requireAuth, formRateLimiter, validate(createReviewSchema), createProductReview);
 router.delete("/item/:reviewId", requireAuth, deleteMyReview);
 router.post("/:reviewId/replies", requireAuth, formRateLimiter, validate(replySchema), addReviewReply);

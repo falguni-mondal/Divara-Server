@@ -2,6 +2,7 @@ import { Review } from "../models/Review.js";
 import { Product } from "../models/Product.js";
 import { Order } from "../models/Order.js";
 import { deleteImageKitFile } from "../config/imagekit.js";
+import { logAdminAction } from "../utils/auditLogger.js";
 import { sendSuccess } from "../utils/apiResponse.js";
 import { ApiError } from "../utils/apiError.js";
 
@@ -17,7 +18,7 @@ function formatReplyDTO(rep) {
   };
 }
 
-function formatReviewDTO(r) {
+function formatPublicReviewDTO(r) {
   return {
     id: String(r._id),
     userId: r.userId ? String(r.userId) : null,
@@ -32,6 +33,32 @@ function formatReviewDTO(r) {
   };
 }
 
+async function computeReviewEligibility(user, productId) {
+  if (!user) {
+    return { canReview: false, reason: "NOT_LOGGED_IN" };
+  }
+  if (user.role === "admin" || user.role === "super_admin") {
+    return { canReview: false, reason: "ADMIN_DISABLED" };
+  }
+
+  const [alreadyReviewed, hasDeliveredOrder] = await Promise.all([
+    Review.exists({ productId, userId: user._id }),
+    Order.exists({
+      userId: user._id,
+      status: "DELIVERED",
+      "items.productId": productId,
+    }),
+  ]);
+
+  if (alreadyReviewed) {
+    return { canReview: false, reason: "ALREADY_REVIEWED" };
+  }
+  if (!hasDeliveredOrder) {
+    return { canReview: false, reason: "DELIVERY_REQUIRED" };
+  }
+  return { canReview: true, reason: "ELIGIBLE" };
+}
+
 export async function listProductReviews(req, res) {
   const slug = req.params.slug.toLowerCase();
   const product = await Product.findOne({ slug, isActive: true }).select("_id").lean();
@@ -39,13 +66,23 @@ export async function listProductReviews(req, res) {
     throw ApiError.notFound("Product not found");
   }
 
-  const [reviews, stats] = await Promise.all([
-    Review.find({ productId: product._id, status: "PUBLISHED" })
+  const visibilityFilter = req.user?._id
+    ? {
+        productId: product._id,
+        $or: [
+          { status: "PUBLISHED" },
+          { userId: req.user._id, status: "PENDING" },
+        ],
+      }
+    : { productId: product._id, status: "PUBLISHED" };
+
+  const [reviews, stats, eligibility] = await Promise.all([
+    Review.find(visibilityFilter)
       .sort({ isVerifiedPurchase: -1, createdAt: -1 })
       .limit(50)
       .lean(),
     Review.aggregate([
-      { $match: { productId: product._id, status: "PUBLISHED" } },
+      { $match: visibilityFilter },
       {
         $facet: {
           overall: [
@@ -61,6 +98,7 @@ export async function listProductReviews(req, res) {
         },
       },
     ]),
+    computeReviewEligibility(req.user, product._id),
   ]);
 
   const overall = stats[0]?.overall?.[0];
@@ -73,28 +111,41 @@ export async function listProductReviews(req, res) {
 
   return sendSuccess(res, {
     data: {
+      eligibility,
       summary: {
         averageRating: overall ? Number(overall.averageRating.toFixed(1)) : 0,
         totalReviews: overall ? overall.totalReviews : 0,
         breakdown: breakdownMap,
       },
-      reviews: reviews.map(formatReviewDTO),
+      reviews: reviews.map(formatPublicReviewDTO),
     },
   });
 }
 
 export async function createProductReview(req, res) {
+  if (req.user.role === "admin" || req.user.role === "super_admin") {
+    throw ApiError.forbidden(
+      "Admin accounts cannot post customer reviews on product pages. Use the Admin Panel to seed reviews."
+    );
+  }
+
   const slug = req.params.slug.toLowerCase();
   const product = await Product.findOne({ slug, isActive: true }).lean();
   if (!product) {
     throw ApiError.notFound("Product not found");
   }
 
-  const hasPaidOrder = await Order.exists({
+  const hasDeliveredOrder = await Order.exists({
     userId: req.user._id,
-    status: { $in: ["PAID", "PROCESSING", "SHIPPED", "DELIVERED"] },
+    status: "DELIVERED",
     "items.productId": product._id,
   });
+
+  if (!hasDeliveredOrder) {
+    throw ApiError.forbidden(
+      "Only customers who have purchased and received (Delivered) this piece can write a review."
+    );
+  }
 
   const reviewerName = req.user.fullName?.trim() || req.user.email.split("@")[0];
 
@@ -108,13 +159,13 @@ export async function createProductReview(req, res) {
     title: req.body.title,
     comment: req.body.comment,
     images: (req.body.images || []).slice(0, 3),
-    isVerifiedPurchase: Boolean(hasPaidOrder),
+    isVerifiedPurchase: true,
+    status: "PENDING",
   });
 
   return sendSuccess(res, {
     statusCode: 201,
-    message: "Thank you for sharing your review.",
-    data: { review: formatReviewDTO(review) },
+    data: { review: formatPublicReviewDTO(review) },
   });
 }
 
@@ -143,7 +194,7 @@ export async function addReviewReply(req, res) {
     throw ApiError.badRequest("Parent reply not found");
   }
 
-  const isAdmin = req.user.role === "admin";
+  const isAdmin = req.user.role === "admin" || req.user.role === "super_admin";
   const authorName = isAdmin
     ? "DIVARA Atelier"
     : req.user.fullName?.trim() || req.user.email.split("@")[0];
@@ -173,7 +224,8 @@ export async function deleteReviewReply(req, res) {
   const reply = review.replies.id(req.params.replyId);
   if (!reply) throw ApiError.notFound("Reply not found");
 
-  if (String(reply.userId) !== String(req.user._id) && req.user.role !== "admin") {
+  const isAdmin = req.user.role === "admin" || req.user.role === "super_admin";
+  if (String(reply.userId) !== String(req.user._id) && !isAdmin) {
     throw ApiError.forbidden("You can only delete your own reply");
   }
 
@@ -181,6 +233,65 @@ export async function deleteReviewReply(req, res) {
   await review.save();
 
   return sendSuccess(res, { message: "Reply deleted." });
+}
+
+export async function adminListReviews(req, res) {
+  const status = req.query.status || "PENDING";
+  const filter = status !== "ALL" ? { status } : {};
+
+  const [reviews, pendingCount, publishedCount, hiddenCount] = await Promise.all([
+    Review.find(filter)
+      .populate("productId", "title slug imageMedia")
+      .sort({ createdAt: -1 })
+      .limit(150)
+      .lean(),
+    Review.countDocuments({ status: "PENDING" }),
+    Review.countDocuments({ status: "PUBLISHED" }),
+    Review.countDocuments({ status: "HIDDEN" }),
+  ]);
+
+  return sendSuccess(res, {
+    data: {
+      counts: { pending: pendingCount, published: publishedCount, hidden: hiddenCount },
+      reviews: reviews.map((r) => ({
+        id: String(r._id),
+        productTitle: r.productId?.title || r.productSlug,
+        productSlug: r.productSlug,
+        productImage: r.productId?.imageMedia?.url || "",
+        reviewerName: r.reviewerName,
+        rating: r.rating,
+        title: r.title,
+        comment: r.comment,
+        images: r.images || [],
+        isVerifiedPurchase: r.isVerifiedPurchase,
+        isSeeded: r.isSeeded,
+        status: r.status,
+        createdAt: r.createdAt,
+      })),
+    },
+  });
+}
+
+export async function adminUpdateReviewStatus(req, res) {
+  const { status } = req.body;
+  const review = await Review.findByIdAndUpdate(
+    req.params.reviewId,
+    { $set: { status } },
+    { returnDocument: "after" }
+  );
+  if (!review) throw ApiError.notFound("Review not found");
+
+  await logAdminAction(req, {
+    action: "REVIEW_MODERATED",
+    targetType: "review",
+    targetId: review._id,
+    summary: `Set review "${review.title}" by ${review.reviewerName} to ${status}.`,
+  });
+
+  return sendSuccess(res, {
+    message: `Review marked as ${status}.`,
+    data: { id: String(review._id), status: review.status },
+  });
 }
 
 export async function adminSeedReviews(req, res) {
@@ -207,10 +318,17 @@ export async function adminSeedReviews(req, res) {
 
   const inserted = await Review.insertMany(docs);
 
+  await logAdminAction(req, {
+    action: "REVIEW_SEEDED",
+    targetType: "product",
+    targetId: product._id,
+    summary: `Seeded ${inserted.length} review(s) for "${product.title}".`,
+  });
+
   return sendSuccess(res, {
     statusCode: 201,
     message: `Seeded ${inserted.length} review(s) for ${product.title}.`,
-    data: { count: inserted.length, reviews: inserted.map(formatReviewDTO) },
+    data: { count: inserted.length, reviews: inserted.map(formatPublicReviewDTO) },
   });
 }
 
@@ -220,6 +338,13 @@ export async function adminDeleteReview(req, res) {
 
   await Promise.all((review.images || []).map((img) => deleteImageKitFile(img.fileId)));
   await Review.deleteOne({ _id: review._id });
+
+  await logAdminAction(req, {
+    action: "REVIEW_DELETED",
+    targetType: "review",
+    targetId: review._id,
+    summary: `Deleted review "${review.title}" by ${review.reviewerName}.`,
+  });
 
   return sendSuccess(res, { message: "Review removed by admin." });
 }

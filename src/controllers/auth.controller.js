@@ -7,8 +7,9 @@ import { env } from "../config/env.js";
 import { sendEmail } from "../config/resend.js";
 import { ApiError } from "../utils/apiError.js";
 import { sendSuccess } from "../utils/apiResponse.js";
-import { ADMIN_ROLES } from "../middlewares/auth.middleware.js";
+import { ADMIN_ROLES, getCookieOptions } from "../middlewares/auth.middleware.js";
 import { logAdminAction } from "../utils/auditLogger.js";
+import { appCache } from "../utils/lruCache.js";
 import {
   generateTotpSecret,
   verifyTotpCode,
@@ -20,8 +21,48 @@ import {
   revokeCurrentSession,
 } from "../services/auth.service.js";
 
+const TOTP_CHALLENGE_COOKIE = "divara_totp_challenge";
+const TOTP_CHALLENGE_TTL_MS = 5 * 60 * 1000;
+const TOTP_MAX_ATTEMPTS = 5;
+
 function sha256(str) {
   return crypto.createHash("sha256").update(str).digest("hex");
+}
+
+function signTotpChallenge({ userId, email }) {
+  const exp = Date.now() + TOTP_CHALLENGE_TTL_MS;
+  const payload = Buffer.from(JSON.stringify({ sub: String(userId), email, exp })).toString("base64url");
+  const sig = crypto
+    .createHmac("sha256", env.JWT_ACCESS_SECRET)
+    .update(payload)
+    .digest("base64url");
+  return `${payload}.${sig}`;
+}
+
+function verifyTotpChallengeCookie(cookieVal, expectedEmail) {
+  if (!cookieVal || typeof cookieVal !== "string") return null;
+  const parts = cookieVal.split(".");
+  if (parts.length !== 2) return null;
+  const [payload, sig] = parts;
+  const expectedSig = crypto
+    .createHmac("sha256", env.JWT_ACCESS_SECRET)
+    .update(payload)
+    .digest("base64url");
+
+  const sigBuf = Buffer.from(sig, "utf8");
+  const expBuf = Buffer.from(expectedSig, "utf8");
+  if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    if (!parsed.exp || Date.now() > parsed.exp) return null;
+    if (parsed.email !== expectedEmail) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
 }
 
 function maskEmail(email) {
@@ -151,6 +192,10 @@ export async function emailPasswordContinue(req, res) {
       user.totpEnabled = false;
       await user.save();
     }
+
+    // Bind TOTP verification strictly to this password-verified challenge cookie
+    const challengeToken = signTotpChallenge({ userId: user._id, email: user.email });
+    res.cookie(TOTP_CHALLENGE_COOKIE, challengeToken, getCookieOptions(TOTP_CHALLENGE_TTL_MS));
 
     await logAdminAction(req, {
       actor: user,
@@ -305,35 +350,50 @@ export async function verifyEmailOtp(req, res) {
   }
 
   if (record.attempts >= 5) {
-    record.isUsed = true;
-    await record.save();
+    await AuthOtp.updateOne({ _id: record._id }, { $set: { isUsed: true } });
     throw ApiError.unauthorized("Too many invalid attempts. Please request a new code.");
   }
 
   if (record.otpHash !== sha256(otp)) {
-    record.attempts += 1;
-    await record.save();
+    const updated = await AuthOtp.findByIdAndUpdate(
+      record._id,
+      { $inc: { attempts: 1 } },
+      { returnDocument: "after" }
+    );
     if (purpose === "ADMIN_LOGIN") {
       await logAdminAction(req, {
         actorEmail: email,
         actorRole: "admin",
         action: "ADMIN_OTP_FAILED",
         status: "FAILED",
-        summary: `Invalid OTP entered for ${email} (attempt ${record.attempts}/5).`,
+        summary: `Invalid OTP entered for ${email} (attempt ${updated?.attempts || record.attempts + 1}/5).`,
       });
     }
     throw ApiError.unauthorized("Invalid verification code. Please try again.");
   }
 
-  record.isUsed = true;
-  await record.save();
+  // Atomic claim prevents concurrent replay of the same OTP
+  const claimed = await AuthOtp.findOneAndUpdate(
+    { _id: record._id, isUsed: false },
+    { $set: { isUsed: true } },
+    { returnDocument: "after" }
+  );
+
+  if (!claimed) {
+    throw ApiError.unauthorized("Verification code already used. Please request a new code.");
+  }
 
   let user;
   if (purpose === "CUSTOMER_REGISTER") {
+    const existing = await User.findOne({ email: claimed.email });
+    if (existing) {
+      throw ApiError.conflict("An account with this email already exists. Please sign in.");
+    }
+
     user = await User.create({
-      email: record.email,
-      fullName: record.pendingFullName,
-      passwordHash: record.pendingPasswordHash,
+      email: claimed.email,
+      fullName: claimed.pendingFullName,
+      passwordHash: claimed.pendingPasswordHash,
       authProvider: "local",
       role: "customer",
       lastLoginAt: new Date(),
@@ -345,7 +405,7 @@ export async function verifyEmailOtp(req, res) {
       payload: { email: user.email, fullName: user.fullName },
     });
   } else {
-    user = await User.findById(record.userId);
+    user = await User.findById(claimed.userId);
     if (!user || !user.isActive || !ADMIN_ROLES.has(user.role)) {
       throw ApiError.unauthorized("Admin account unavailable");
     }
@@ -376,21 +436,45 @@ export async function verifySuperAdminTotp(req, res) {
   const email = req.body.email.toLowerCase().trim();
   const code = req.body.code.trim();
 
-  const user = await User.findOne({ email, role: "super_admin" }).select("+totpSecret");
+  // Enforce password-first challenge cookie
+  const challenge = verifyTotpChallengeCookie(req.cookies?.[TOTP_CHALLENGE_COOKIE], email);
+  if (!challenge) {
+    throw ApiError.unauthorized("Authentication challenge expired. Please enter your password again.");
+  }
+
+  const user = await User.findOne({ _id: challenge.sub, email, role: "super_admin" }).select("+totpSecret");
   if (!user || !user.isActive || !user.totpSecret) {
     throw ApiError.unauthorized("Invalid Super Admin TOTP request");
   }
 
+  const attemptsKey = `totp_attempts:${user._id}`;
+  const failedAttempts = appCache.get(attemptsKey) || 0;
+  if (failedAttempts >= TOTP_MAX_ATTEMPTS) {
+    res.clearCookie(TOTP_CHALLENGE_COOKIE, getCookieOptions(0));
+    throw ApiError.tooManyRequests("Too many failed authenticator attempts. Please wait 10 minutes.");
+  }
+
+  const replayKey = `totp_used:${user._id}:${code}`;
+  if (appCache.get(replayKey)) {
+    throw ApiError.unauthorized("This authenticator code was already used. Wait for the next 30-second code.");
+  }
+
   const valid = verifyTotpCode(user.totpSecret, code, 1);
   if (!valid) {
+    appCache.set(attemptsKey, failedAttempts + 1, 10 * 60 * 1000);
     await logAdminAction(req, {
       actor: user,
       action: "SUPER_ADMIN_TOTP_FAILED",
       status: "FAILED",
-      summary: `Invalid TOTP authenticator code entered for ${user.email}.`,
+      summary: `Invalid TOTP authenticator code entered for ${user.email} (attempt ${failedAttempts + 1}/${TOTP_MAX_ATTEMPTS}).`,
     });
     throw ApiError.unauthorized("Invalid 6-digit authenticator code.");
   }
+
+  // Mark code used for 95s (covers ±1 TOTP step window) & clear challenge cookie
+  appCache.set(replayKey, true, 95 * 1000);
+  appCache.delete(attemptsKey);
+  res.clearCookie(TOTP_CHALLENGE_COOKIE, getCookieOptions(0));
 
   if (!user.totpEnabled) {
     user.totpEnabled = true;
@@ -415,7 +499,7 @@ export async function verifySuperAdminTotp(req, res) {
 }
 
 export async function googleCallback(req, res) {
-  if (!req.user) {
+  if (!req.user || !req.user.isActive) {
     return res.redirect(`${env.CLIENT_ORIGIN}/account?auth=failed`);
   }
   if (ADMIN_ROLES.has(req.user.role)) {
@@ -439,6 +523,7 @@ export async function logout(req, res) {
       summary: `${req.user.email} signed out of the Admin Panel.`,
     });
   }
+  res.clearCookie(TOTP_CHALLENGE_COOKIE, getCookieOptions(0));
   await revokeCurrentSession(req, res);
   return sendSuccess(res, { message: "Signed out cleanly" });
 }

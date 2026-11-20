@@ -34,7 +34,6 @@ export function createApp() {
   );
 
   app.use(express.json({ limit: "256kb" }));
-  app.use(express.urlencoded({ extended: false, limit: "256kb" }));
   app.use(cookieParser());
 
   const passport = configurePassport();

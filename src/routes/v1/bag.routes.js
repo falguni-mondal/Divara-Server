@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
-import { requireAuth } from "../../middlewares/auth.middleware.js";
+import { requireAuth, blockAdminShopping } from "../../middlewares/auth.middleware.js";
 import { validate } from "../../middlewares/validate.middleware.js";
 import {
   getBag,
@@ -8,8 +8,6 @@ import {
   updateBagItem,
   toggleWishlistItem,
 } from "../../controllers/bag.controller.js";
-
-import {blockAdminShopping} from "../../middlewares/auth.middleware.js";
 
 const router = Router();
 const validSizes = z.enum(["XS", "S", "M", "L", "XL", "Free Size"]);
