@@ -193,7 +193,7 @@ async function finalizePaidOrder(order, rzpPaymentId) {
               payload: mailPayload,
             },
           ],
-          { session }
+          { session, ordered: true }
         );
       }
     });
@@ -240,6 +240,7 @@ export async function createCheckoutSession(
     await session.withTransaction(async () => {
       const orderItems = [];
       const reservedItems = [];
+      const lockedLines = [];
       let subtotalPaise = 0;
 
       for (const item of bag.items) {
@@ -280,7 +281,15 @@ export async function createCheckoutSession(
         }
 
         const matchedVariant = updatedProduct.variants.find((v) => v.size === item.size);
-        subtotalPaise += updatedProduct.pricePaise * item.quantity;
+        const linePaise = updatedProduct.pricePaise * item.quantity;
+        subtotalPaise += linePaise;
+
+        lockedLines.push({
+          productId: updatedProduct._id,
+          category: updatedProduct.category,
+          season: updatedProduct.season,
+          linePaise,
+        });
 
         orderItems.push({
           productId: updatedProduct._id,
@@ -310,7 +319,6 @@ export async function createCheckoutSession(
       if (appliedCoupon?.valid) {
         const cpn = appliedCoupon.coupon;
 
-        // Re-verify per-user & first-order limits inside the ACID transaction
         if (cpn.maxUsesPerUser) {
           const userUses = await CouponRedemption.countDocuments({
             couponId: cpn._id,
@@ -348,21 +356,36 @@ export async function createCheckoutSession(
           throw ApiError.conflict("This coupon just reached its maximum usage limit.");
         }
 
-        // Recompute discount from locked transaction subtotalPaise
-        let computedDiscountPaise = 0;
-        if (claimed.discountType === "PERCENT") {
-          computedDiscountPaise = Math.round((subtotalPaise * claimed.discountValue) / 100);
-          if (claimed.maxDiscountInr) {
-            computedDiscountPaise = Math.min(
-              computedDiscountPaise,
-              Math.round(claimed.maxDiscountInr * 100)
+        // Compute eligible subtotal from locked transaction prices (matches coupon.service.js exactly)
+        let eligibleSubtotalPaise = 0;
+        for (const line of lockedLines) {
+          let eligible = false;
+          if (claimed.applicableTo === "ALL") {
+            eligible = true;
+          } else if (claimed.applicableTo === "SPECIFIC_PRODUCTS") {
+            eligible = (claimed.productIds || []).some(
+              (id) => String(id) === String(line.productId)
             );
+          } else if (claimed.applicableTo === "SPECIFIC_CATEGORIES") {
+            eligible = (claimed.categories || []).includes(line.category);
+          } else if (claimed.applicableTo === "SPECIFIC_SEASONS") {
+            eligible = (claimed.seasons || []).includes(line.season);
           }
-        } else {
-          computedDiscountPaise = Math.round(claimed.discountValue * 100);
+          if (eligible) eligibleSubtotalPaise += line.linePaise;
         }
 
-        discountPaise = Math.min(subtotalPaise, computedDiscountPaise);
+        let computedDiscountInr = 0;
+        const eligibleSubtotalInr = eligibleSubtotalPaise / 100;
+        if (claimed.discountType === "PERCENTAGE") {
+          computedDiscountInr = Math.round((eligibleSubtotalInr * claimed.discountValue) / 100);
+          if (claimed.maxDiscountInr && computedDiscountInr > claimed.maxDiscountInr) {
+            computedDiscountInr = claimed.maxDiscountInr;
+          }
+        } else {
+          computedDiscountInr = Math.min(eligibleSubtotalInr, claimed.discountValue);
+        }
+
+        discountPaise = Math.min(subtotalPaise, Math.round(computedDiscountInr * 100));
         couponId = claimed._id;
         usedCouponCode = claimed.code;
       }
@@ -420,7 +443,7 @@ export async function createCheckoutSession(
             status: "PENDING_PAYMENT",
           },
         ],
-        { session }
+        { session, ordered: true }
       );
 
       if (couponId) {
@@ -435,7 +458,7 @@ export async function createCheckoutSession(
               status: "RESERVED",
             },
           ],
-          { session }
+          { session, ordered: true }
         );
       }
 
@@ -450,7 +473,7 @@ export async function createCheckoutSession(
             expiresAt: new Date(Date.now() + RESERVATION_TTL_MS),
           },
         ],
-        { session }
+        { session, ordered: true }
       );
 
       createdOrder = orderDoc;
@@ -474,7 +497,6 @@ export async function createCheckoutSession(
       });
       razorpayOrderId = rzpOrder.id;
     } catch (err) {
-      // Immediately release stock & coupon holds so failed gateway calls never lock inventory
       const rollbackSession = await mongoose.startSession();
       try {
         await rollbackSession.withTransaction(async () => {
@@ -614,7 +636,6 @@ export async function cancelCustomerOrder(req, orderNumber, reason = "Cancelled 
         },
       ];
 
-      // Alert admin immediately if a paid order was cancelled so refund can be issued
       if (wasPaid) {
         jobsToQueue.push({
           type: "SEND_CONCIERGE_ALERT",
@@ -630,7 +651,7 @@ export async function cancelCustomerOrder(req, orderNumber, reason = "Cancelled 
         });
       }
 
-      await Job.create(jobsToQueue, { session });
+      await Job.create(jobsToQueue, { session, ordered: true });
     });
   } finally {
     await session.endSession();
@@ -745,7 +766,7 @@ export async function executeOrderRefundAndRestock(
               },
             },
           ],
-          { session }
+          { session, ordered: true }
         );
       });
     } finally {
@@ -870,7 +891,6 @@ export async function processRazorpayWebhook({ rawBody, signature, eventId }) {
     const order = await Order.findOne({ razorpayOrderId: rzpOrderId });
     return await finalizePaidOrder(order, rzpPaymentId);
   } catch (processingErr) {
-    // Release dedupe lock on transient failure so Razorpay retry can succeed
     await WebhookEvent.deleteOne({ eventId: dedupeId }).catch(() => {});
     throw processingErr;
   }
