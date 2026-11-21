@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { CATEGORY_LABELS } from "./Product.js";
 
 const couponSchema = new mongoose.Schema(
   {
@@ -10,7 +11,6 @@ const couponSchema = new mongoose.Schema(
       trim: true,
       index: true,
     },
-    // Auto-capitalized display name (e.g. "WINTER ROYALTY SALE")
     name: {
       type: String,
       required: true,
@@ -29,13 +29,11 @@ const couponSchema = new mongoose.Schema(
       enum: ["PERCENTAGE", "FIXED"],
       required: true,
     },
-    // Percentage (1–100) or Fixed amount in INR
     discountValue: {
       type: Number,
       required: true,
       min: 1,
     },
-    // Optional cap in INR when discountType === "PERCENTAGE" (null = uncapped)
     maxDiscountInr: {
       type: Number,
       default: null,
@@ -47,17 +45,14 @@ const couponSchema = new mongoose.Schema(
       default: "MANUAL",
       index: true,
     },
-    // Can be a past, current, or future date/time
     startsAt: {
       type: Date,
       required: true,
     },
-    // Null means no expiration date
     endsAt: {
       type: Date,
       default: null,
     },
-    // Global usage limit: null = infinite overall usage
     maxTotalUses: {
       type: Number,
       default: null,
@@ -68,13 +63,11 @@ const couponSchema = new mongoose.Schema(
       default: 0,
       min: 0,
     },
-    // Per-user usage limit: 1 = once per user, N = multiple, null = unlimited per user
     maxUsesPerUser: {
       type: Number,
       default: 1,
       min: 1,
     },
-    // Scope targeting
     applicableTo: {
       type: String,
       enum: ["ALL", "SPECIFIC_PRODUCTS", "SPECIFIC_CATEGORIES", "SPECIFIC_SEASONS"],
@@ -89,7 +82,7 @@ const couponSchema = new mongoose.Schema(
     categories: [
       {
         type: String,
-        enum: ["saree", "dress", "denim", "shirt"],
+        enum: Object.keys(CATEGORY_LABELS),
       },
     ],
     seasons: [
@@ -98,7 +91,6 @@ const couponSchema = new mongoose.Schema(
         enum: ["Winter", "Spring", "Summer", "Autumn"],
       },
     ],
-    // User targeting (empty arrays = open to all signed-in users)
     eligibleUserIds: [
       {
         type: mongoose.Schema.Types.ObjectId,

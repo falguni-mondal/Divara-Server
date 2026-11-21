@@ -17,6 +17,7 @@ import { ApiError } from "../utils/apiError.js";
 const RESERVATION_TTL_MS = 15 * 60 * 1000;
 const RETURN_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 const GST_RATE = 0.12;
+const MAX_QTY_PER_ITEM = 10;
 const activeRefundLocks = new Set();
 
 function getRazorpayClient() {
@@ -33,8 +34,44 @@ function generateOrderNumber() {
   return `DIV-${datePart}-${randPart}`;
 }
 
+/**
+ * Deduplicates any identical (productId, size) lines and sorts deterministically
+ * by productId + size to prevent MongoDB multi-document transaction deadlocks.
+ */
+function normalizeBagItemsForLocking(rawItems = []) {
+  const merged = new Map();
+  for (const item of rawItems) {
+    const qty = Math.max(0, Math.floor(Number(item.quantity) || 0));
+    if (qty <= 0) continue;
+    const key = `${String(item.productId)}::${item.size}`;
+    if (merged.has(key)) {
+      const existing = merged.get(key);
+      existing.quantity = Math.min(MAX_QTY_PER_ITEM, existing.quantity + qty);
+    } else {
+      merged.set(key, {
+        ...item,
+        quantity: Math.min(MAX_QTY_PER_ITEM, qty),
+      });
+    }
+  }
+  return Array.from(merged.values()).sort((a, b) =>
+    `${String(a.productId)}:${a.size}`.localeCompare(`${String(b.productId)}:${b.size}`)
+  );
+}
+
+/**
+ * Atomically claims stockRestored=false -> true inside the active session
+ * so concurrent cancel + refund webhook can NEVER double-restock.
+ */
 export async function restoreOrderStockInSession(orderDoc, session) {
   if (!orderDoc || orderDoc.stockRestored) return false;
+
+  const claimed = await Order.findOneAndUpdate(
+    { _id: orderDoc._id, stockRestored: false },
+    { $set: { stockRestored: true } },
+    { session, returnDocument: "before" }
+  );
+  if (!claimed) return false;
 
   const reservation = await Reservation.findOne({ orderId: orderDoc._id }).session(session);
 
@@ -87,6 +124,127 @@ export async function restoreOrderStockInSession(orderDoc, session) {
   return true;
 }
 
+/**
+ * Fast pre-pay stock, active-status, and price verification before opening payment.
+ * Does not reserve stock; `createCheckoutSession` performs the authoritative atomic reservation.
+ */
+export async function preflightCheckoutStock(req, { couponCode = null } = {}) {
+  const userId = req.user._id;
+  const bag = await Bag.findOne({ userId }).lean();
+  if (!bag || bag.items.length === 0) {
+    throw ApiError.badRequest("Your shopping bag is empty.");
+  }
+
+  const normalizedItems = normalizeBagItemsForLocking(bag.items);
+  const issues = [];
+  let subtotalInr = 0;
+
+  for (const item of normalizedItems) {
+    const prod = await Product.findById(item.productId)
+      .select("_id slug title price isActive variants")
+      .lean();
+    if (!prod || !prod.isActive) {
+      issues.push({
+        productId: String(item.productId),
+        slug: item.slug,
+        title: item.title,
+        size: item.size,
+        requestedQty: item.quantity,
+        availableStock: 0,
+        reason: `"${item.title}" is no longer available.`,
+      });
+      continue;
+    }
+
+    const variant = (prod.variants || []).find((v) => v.size === item.size);
+    const availableStock = variant
+      ? Math.max(0, (variant.stockOnHand || 0) - (variant.stockReserved || 0))
+      : 0;
+
+    if (!variant || availableStock < item.quantity) {
+      issues.push({
+        productId: String(prod._id),
+        slug: prod.slug,
+        title: prod.title,
+        size: item.size,
+        requestedQty: item.quantity,
+        availableStock,
+        reason:
+          availableStock <= 0
+            ? `"${prod.title}" (${item.size}) is now out of stock.`
+            : `"${prod.title}" (${item.size}) only has ${availableStock} piece(s) remaining.`,
+      });
+      continue;
+    }
+
+    subtotalInr += prod.price * item.quantity;
+  }
+
+  let couponResult = null;
+  if (issues.length === 0) {
+    try {
+      couponResult = await resolveCheckoutCoupon({
+        user: req.user,
+        bagItems: normalizedItems,
+        couponCode,
+      });
+    } catch (couponErr) {
+      issues.push({
+        reason: couponErr.message || "Selected coupon is no longer valid.",
+        isCouponIssue: true,
+      });
+    }
+  }
+
+  return {
+    ok: issues.length === 0,
+    issues,
+    subtotalInr,
+    discountInr: couponResult?.valid ? couponResult.discountInr : 0,
+    totalInr: Math.max(0, subtotalInr - (couponResult?.valid ? couponResult.discountInr : 0)),
+    checkedAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * Releases a user's own PENDING_PAYMENT checkout hold immediately when they dismiss
+ * the Razorpay modal or cancel before payment — preventing 15-minute stock lockouts.
+ */
+export async function releaseAbandonedCheckout(req, { orderId, razorpayOrderId }) {
+  const filter = {
+    userId: req.user._id,
+    status: "PENDING_PAYMENT",
+    paidAt: null,
+  };
+  if (orderId && /^[a-f\d]{24}$/i.test(orderId)) filter._id = orderId;
+  else if (razorpayOrderId) filter.razorpayOrderId = razorpayOrderId;
+  else throw ApiError.badRequest("orderId or razorpayOrderId is required.");
+
+  const session = await mongoose.startSession();
+  let released = false;
+  try {
+    await session.withTransaction(async () => {
+      const fresh = await Order.findOne(filter).session(session);
+      if (!fresh || fresh.status !== "PENDING_PAYMENT" || fresh.paidAt) return;
+
+      await restoreOrderStockInSession(fresh, session);
+      fresh.status = "CANCELLED";
+      fresh.cancelledAt = new Date();
+      fresh.cancelReason = "Checkout dismissed by customer before payment";
+      await fresh.save({ session });
+      released = true;
+    });
+  } finally {
+    await session.endSession();
+  }
+
+  if (released) {
+    appCache.invalidatePrefix("catalog:");
+  }
+
+  return { released };
+}
+
 async function finalizePaidOrder(order, rzpPaymentId) {
   if (!order) return { notFound: true };
   if (["PAID", "PROCESSING", "SHIPPED", "DELIVERED", "CONCIERGE_REVIEW"].includes(order.status)) {
@@ -99,7 +257,6 @@ async function finalizePaidOrder(order, rzpPaymentId) {
       const freshOrder = await Order.findById(order._id).session(session);
       if (!freshOrder) return;
 
-      // Allow processing PENDING_PAYMENT OR a recently auto-cancelled unpaid order (late Razorpay capture)
       const isProcessable =
         freshOrder.status === "PENDING_PAYMENT" ||
         (freshOrder.status === "CANCELLED" && !freshOrder.paidAt);
@@ -128,19 +285,51 @@ async function finalizePaidOrder(order, rzpPaymentId) {
         freshOrder.status = "PAID";
         freshOrder.stockRestored = false;
       } else {
-        // Hold expired & was released before payment settled — attempt atomic deduction or route to Concierge
-        let allDeducted = true;
+        // Hold expired & was released before payment settled.
+        // Verify ALL items can be deducted cleanly BEFORE deducting any item to avoid partial stock leaks.
+        let allAvailable = true;
         for (const item of freshOrder.items) {
-          const updated = await Product.findOneAndUpdate(
-            {
-              _id: item.productId,
-              variants: { $elemMatch: { size: item.size, stockOnHand: { $gte: item.quantity } } },
-            },
-            { $inc: { "variants.$.stockOnHand": -item.quantity } },
-            { session, returnDocument: "after" }
-          );
-          if (!updated) allDeducted = false;
+          const prodDoc = await Product.findById(item.productId).session(session);
+          const v = prodDoc?.variants?.find((vr) => vr.size === item.size);
+          const freeStock = v ? Math.max(0, (v.stockOnHand || 0) - (v.stockReserved || 0)) : 0;
+          if (!v || freeStock < item.quantity) {
+            allAvailable = false;
+            break;
+          }
         }
+
+        let allDeducted = false;
+        if (allAvailable) {
+          allDeducted = true;
+          const deducted = [];
+          for (const item of freshOrder.items) {
+            const updated = await Product.findOneAndUpdate(
+              {
+                _id: item.productId,
+                variants: { $elemMatch: { size: item.size, stockOnHand: { $gte: item.quantity } } },
+              },
+              { $inc: { "variants.$.stockOnHand": -item.quantity } },
+              { session, returnDocument: "after" }
+            );
+            if (!updated) {
+              allDeducted = false;
+              break;
+            }
+            deducted.push(item);
+          }
+
+          // Roll back any partial deductions inside the transaction if a later item failed
+          if (!allDeducted && deducted.length > 0) {
+            for (const item of deducted) {
+              await Product.updateOne(
+                { _id: item.productId, "variants.size": item.size },
+                { $inc: { "variants.$.stockOnHand": item.quantity } },
+                { session }
+              );
+            }
+          }
+        }
+
         freshOrder.status = allDeducted ? "PAID" : "CONCIERGE_REVIEW";
         freshOrder.stockRestored = !allDeducted;
       }
@@ -216,6 +405,11 @@ export async function createCheckoutSession(
     throw ApiError.badRequest("Your shopping bag is empty");
   }
 
+  const normalizedItems = normalizeBagItemsForLocking(bag.items);
+  if (normalizedItems.length === 0) {
+    throw ApiError.badRequest("Your shopping bag has no valid items");
+  }
+
   const activeHolds = await Reservation.countDocuments({
     userId,
     status: "HELD",
@@ -223,13 +417,13 @@ export async function createCheckoutSession(
   });
   if (activeHolds >= 2) {
     throw ApiError.conflict(
-      "You already have an active checkout session. Please complete or wait for it to expire."
+      "You already have an active checkout session. Please complete or close it before retrying."
     );
   }
 
   const appliedCoupon = await resolveCheckoutCoupon({
     user: req.user,
-    bagItems: bag.items,
+    bagItems: normalizedItems,
     couponCode,
   });
 
@@ -243,7 +437,8 @@ export async function createCheckoutSession(
       const lockedLines = [];
       let subtotalPaise = 0;
 
-      for (const item of bag.items) {
+      // Authoritative final stock check + atomic temporary reservation inside ACID transaction
+      for (const item of normalizedItems) {
         const prodDoc = await Product.findOne({
           _id: item.productId,
           isActive: true,
@@ -255,7 +450,11 @@ export async function createCheckoutSession(
           : 0;
 
         if (!prodDoc || !currentVariant || available < item.quantity) {
-          throw ApiError.conflict(`"${item.title}" (${item.size}) no longer has sufficient stock`);
+          throw ApiError.conflict(
+            available <= 0
+              ? `"${item.title}" (${item.size}) is now out of stock.`
+              : `"${item.title}" (${item.size}) only has ${available} piece(s) left. Please adjust your bag.`
+          );
         }
 
         const updatedProduct = await Product.findOneAndUpdate(
@@ -330,10 +529,11 @@ export async function createCheckoutSession(
           }
         }
 
+        // Include PENDING_PAYMENT to block 2-tab simultaneous first-order coupon abuse
         if (cpn.firstOrderOnly) {
           const hasPriorOrder = await Order.exists({
             userId,
-            status: { $in: ["PAID", "PROCESSING", "SHIPPED", "DELIVERED"] },
+            status: { $in: ["PENDING_PAYMENT", "PAID", "PROCESSING", "SHIPPED", "DELIVERED"] },
           }).session(session);
           if (hasPriorOrder) {
             throw ApiError.conflict("This coupon is valid on your first order only.");
@@ -356,7 +556,6 @@ export async function createCheckoutSession(
           throw ApiError.conflict("This coupon just reached its maximum usage limit.");
         }
 
-        // Compute eligible subtotal from locked transaction prices (matches coupon.service.js exactly)
         let eligibleSubtotalPaise = 0;
         for (const line of lockedLines) {
           let eligible = false;
@@ -390,8 +589,6 @@ export async function createCheckoutSession(
         usedCouponCode = claimed.code;
       }
 
-      // Product prices are FINAL MRP (inclusive of 12% GST).
-      // Intra-state (West Bengal) -> CGST 6% + SGST 6%; Inter-state -> IGST 12%.
       const totalPaise = Math.max(0, subtotalPaise - discountPaise);
       if (totalPaise < 100) {
         throw ApiError.badRequest("Minimum payable order amount is ₹1.");

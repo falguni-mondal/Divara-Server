@@ -5,7 +5,29 @@ export const CATEGORY_LABELS = Object.freeze({
   dress: "Dresses",
   denim: "Denim Wears",
   shirt: "Shirts",
+  sweatshirt: "Sweatshirts",
+  kurta: "Kurtas & Sets",
+  lehenga: "Lehengas",
+  jacket: "Jackets & Capes",
+  trouser: "Trousers",
+  knitwear: "Knitwear",
 });
+
+export const VALID_SIZES = Object.freeze([
+  "XS",
+  "S",
+  "M",
+  "L",
+  "XL",
+  "XXL",
+  "26",
+  "28",
+  "30",
+  "32",
+  "34",
+  "36",
+  "Free Size",
+]);
 
 const mediaItemSchema = new mongoose.Schema(
   {
@@ -20,7 +42,7 @@ const variantSchema = new mongoose.Schema(
   {
     size: {
       type: String,
-      enum: ["XS", "S", "M", "L", "XL", "Free Size"],
+      enum: VALID_SIZES,
       required: true,
     },
     sku: {
@@ -62,7 +84,7 @@ const productSchema = new mongoose.Schema(
     },
     category: {
       type: String,
-      enum: ["saree", "dress", "denim", "shirt"],
+      enum: Object.keys(CATEGORY_LABELS),
       required: true,
     },
     categoryLabel: {
@@ -90,24 +112,20 @@ const productSchema = new mongoose.Schema(
       required: true,
       trim: true,
     },
-    // Price in integer INR (matches catalogData.js & ₹10,000–₹70,000 slider)
     price: {
       type: Number,
       required: true,
       min: 1000,
     },
-    // Integer paise for exact Razorpay math (price * 100)
     pricePaise: {
       type: Number,
       required: true,
       min: 100000,
     },
-    // Primary ImageKit media asset
     imageMedia: {
       type: mediaItemSchema,
       required: true,
     },
-    // Ordered ImageKit gallery assets
     galleryMedia: {
       type: [mediaItemSchema],
       default: [],
@@ -144,7 +162,6 @@ const productSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// Auto-sync categoryLabel and pricePaise before validation
 productSchema.pre("validate", function () {
   if (this.category && !this.categoryLabel) {
     this.categoryLabel = CATEGORY_LABELS[this.category] || this.category;
@@ -154,7 +171,6 @@ productSchema.pre("validate", function () {
   }
 });
 
-// Compound ESR index for /collections multi-facet filtering & price sorting
 productSchema.index({
   isActive: 1,
   category: 1,
@@ -164,7 +180,6 @@ productSchema.index({
   price: 1,
 });
 
-// Weighted text index for SearchOverlay.jsx instant search
 productSchema.index(
   {
     title: "text",
@@ -187,9 +202,6 @@ productSchema.index(
   }
 );
 
-/**
- * Formats a MongoDB Product document into the exact shape consumed by the DIVARA Next.js frontend.
- */
 productSchema.statics.toFrontendDTO = function (doc) {
   const availableSizes = (doc.variants || [])
     .filter((v) => v.stockOnHand - v.stockReserved > 0)

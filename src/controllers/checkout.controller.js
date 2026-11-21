@@ -1,6 +1,8 @@
 import { Order } from "../models/Order.js";
 import { sendSuccess } from "../utils/apiResponse.js";
 import {
+  preflightCheckoutStock,
+  releaseAbandonedCheckout,
   createCheckoutSession,
   verifyRazorpayPayment,
   recordClientPaymentFailure,
@@ -9,6 +11,22 @@ import {
   processRazorpayWebhook,
 } from "../services/checkout.service.js";
 import { ApiError } from "../utils/apiError.js";
+
+export async function preflightCheckout(req, res) {
+  res.set("Cache-Control", "no-store, no-cache, must-revalidate");
+  const data = await preflightCheckoutStock(req, {
+    couponCode: req.body?.couponCode || null,
+  });
+  return sendSuccess(res, { data });
+}
+
+export async function releaseCheckoutHold(req, res) {
+  const data = await releaseAbandonedCheckout(req, {
+    orderId: req.body?.orderId || null,
+    razorpayOrderId: req.body?.razorpayOrderId || null,
+  });
+  return sendSuccess(res, { data });
+}
 
 export async function startCheckout(req, res) {
   const data = await createCheckoutSession(req, {

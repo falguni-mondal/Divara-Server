@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { VALID_SIZES } from "./Product.js";
 
 const reservedItemSchema = new mongoose.Schema(
   {
@@ -10,7 +11,7 @@ const reservedItemSchema = new mongoose.Schema(
     slug: { type: String, required: true },
     size: {
       type: String,
-      enum: ["XS", "S", "M", "L", "XL", "Free Size"],
+      enum: VALID_SIZES,
       required: true,
     },
     quantity: { type: Number, required: true, min: 1 },
@@ -50,12 +51,10 @@ const reservationSchema = new mongoose.Schema(
       enum: ["HELD", "COMMITTED", "RELEASED"],
       default: "HELD",
     },
-    // 15-minute lock window checked by the 60s node-cron reclaimer
     expiresAt: {
       type: Date,
       required: true,
     },
-    // Auto-purge old COMMITTED/RELEASED reservation records after 7 days
     purgeAt: {
       type: Date,
       default: () => new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),

@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { requireAuth, requireAdmin } from "../../middlewares/auth.middleware.js";
 import { validate } from "../../middlewares/validate.middleware.js";
+import { CATEGORY_LABELS } from "../../models/Product.js";
 import {
   validateCoupon,
   getAutoApplicableCoupon,
@@ -12,6 +13,7 @@ import {
 } from "../../controllers/coupon.controller.js";
 
 const router = Router();
+const validCategories = z.enum(Object.keys(CATEGORY_LABELS));
 
 const applySchema = z.object({
   code: z.string().trim().min(2).max(40),
@@ -33,7 +35,7 @@ const couponPayloadSchema = z.object({
     .enum(["ALL", "SPECIFIC_PRODUCTS", "SPECIFIC_CATEGORIES", "SPECIFIC_SEASONS"])
     .default("ALL"),
   productIds: z.array(z.string()).optional().default([]),
-  categories: z.array(z.enum(["saree", "dress", "denim", "shirt"])).optional().default([]),
+  categories: z.array(validCategories).optional().default([]),
   seasons: z.array(z.enum(["Winter", "Spring", "Summer", "Autumn"])).optional().default([]),
   eligibleUserIds: z.array(z.string()).optional().default([]),
   eligibleEmails: z.array(z.string().email()).optional().default([]),

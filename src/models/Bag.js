@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { VALID_SIZES } from "./Product.js";
 
 const bagItemSchema = new mongoose.Schema(
   {
@@ -12,7 +13,7 @@ const bagItemSchema = new mongoose.Schema(
     category: { type: String, required: true, trim: true },
     size: {
       type: String,
-      enum: ["XS", "S", "M", "L", "XL", "Free Size"],
+      enum: VALID_SIZES,
       required: true,
     },
     price: { type: Number, required: true, min: 0 },

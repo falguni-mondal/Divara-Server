@@ -4,7 +4,7 @@ import {
   executeOrderRefundAndRestock,
 } from "../services/checkout.service.js";
 import { User } from "../models/User.js";
-import { Product } from "../models/Product.js";
+import { Product, CATEGORY_LABELS } from "../models/Product.js";
 import { Order } from "../models/Order.js";
 import { Review } from "../models/Review.js";
 import { Newsletter } from "../models/Newsletter.js";
@@ -23,13 +23,6 @@ import { sendSuccess } from "../utils/apiResponse.js";
 import { ApiError } from "../utils/apiError.js";
 
 const PAID_STATUSES = ["PAID", "PROCESSING", "SHIPPED", "DELIVERED"];
-
-const CATEGORY_LABELS = {
-  saree: "Sarees",
-  dress: "Dresses",
-  denim: "Denim",
-  shirt: "Shirts",
-};
 
 const PRODUCT_ALLOWED_FIELDS = [
   "title",

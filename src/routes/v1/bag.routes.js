@@ -8,9 +8,10 @@ import {
   updateBagItem,
   toggleWishlistItem,
 } from "../../controllers/bag.controller.js";
+import { VALID_SIZES } from "../../models/Product.js";
 
 const router = Router();
-const validSizes = z.enum(["XS", "S", "M", "L", "XL", "Free Size"]);
+const validSizes = z.enum(VALID_SIZES);
 
 const addItemSchema = z.object({
   productId: z.string().min(1),
@@ -18,11 +19,16 @@ const addItemSchema = z.object({
   quantity: z.coerce.number().int().min(1).max(10).default(1),
 });
 
-const updateItemSchema = z.object({
-  productId: z.string().min(1),
-  size: validSizes,
-  delta: z.coerce.number().int().min(-10).max(10),
-});
+const updateItemSchema = z
+  .object({
+    productId: z.string().min(1),
+    size: validSizes,
+    delta: z.coerce.number().int().min(-10).max(10).optional(),
+    quantity: z.coerce.number().int().min(0).max(10).optional(),
+  })
+  .refine((d) => typeof d.delta === "number" || typeof d.quantity === "number", {
+    message: "Either delta or quantity is required",
+  });
 
 const wishlistSchema = z.object({
   productId: z.string().min(1),

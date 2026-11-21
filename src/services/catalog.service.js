@@ -2,12 +2,21 @@ import { Product } from "../models/Product.js";
 import { appCache } from "../utils/lruCache.js";
 import { ApiError } from "../utils/apiError.js";
 
+const MAX_QTY_PER_ITEM = 10;
+
 function parseCsvList(val) {
   if (!val || val === "all" || val === "All") return [];
   return String(val)
     .split(",")
     .map((s) => s.trim())
     .filter((s) => s && s.toLowerCase() !== "all");
+}
+
+function toExactCaseInsensitiveRegexList(values) {
+  return values.map((v) => {
+    const escaped = v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`^${escaped}$`, "i");
+  });
 }
 
 function buildSortStage(sortKey) {
@@ -65,7 +74,7 @@ function buildComprehensiveSearchFilter(rawQuery) {
 }
 
 export async function queryCatalog(queryParams = {}) {
-  const categories = parseCsvList(queryParams.category);
+  const categories = parseCsvList(queryParams.category).map((c) => c.toLowerCase());
   const seasons = parseCsvList(queryParams.season);
   const colors = parseCsvList(queryParams.color);
   const fabrics = parseCsvList(queryParams.fabric);
@@ -87,16 +96,15 @@ export async function queryCatalog(queryParams = {}) {
   const page = Math.max(1, Number(queryParams.page) || 1);
   const limit = Math.min(100, Math.max(1, Number(queryParams.limit) || 24));
 
-  // Deterministic cache key using only whitelisted catalog parameters
   const cacheKey = `catalog:list:${JSON.stringify({
     categories,
-    seasons,
-    colors,
-    fabrics,
+    seasons: seasons.map((s) => s.toLowerCase()),
+    colors: colors.map((c) => c.toLowerCase()),
+    fabrics: fabrics.map((f) => f.toLowerCase()),
     sizes,
     minPrice,
     maxPrice,
-    search,
+    search: search.toLowerCase(),
     sort,
     page,
     limit,
@@ -114,9 +122,9 @@ export async function queryCatalog(queryParams = {}) {
   }
 
   if (categories.length > 0) match.category = { $in: categories };
-  if (seasons.length > 0) match.season = { $in: seasons };
-  if (colors.length > 0) match.color = { $in: colors };
-  if (fabrics.length > 0) match.fabric = { $in: fabrics };
+  if (seasons.length > 0) match.season = { $in: toExactCaseInsensitiveRegexList(seasons) };
+  if (colors.length > 0) match.color = { $in: toExactCaseInsensitiveRegexList(colors) };
+  if (fabrics.length > 0) match.fabric = { $in: toExactCaseInsensitiveRegexList(fabrics) };
   if (sizes.length > 0) {
     match.variants = { $elemMatch: { size: { $in: sizes } } };
   }
@@ -208,6 +216,144 @@ export async function getProductBySlug(slug) {
 
   appCache.set(cacheKey, result, 60_000);
   return result;
+}
+
+/**
+ * Uncached live stock lookup directly from MongoDB for PDP initial check & debounced quantity checks.
+ */
+export async function getProductLiveStock(slugOrId) {
+  const clean = String(slugOrId || "").trim();
+  const isObjectId = /^[a-f\d]{24}$/i.test(clean);
+
+  const doc = await Product.findOne(
+    isObjectId ? { _id: clean } : { slug: clean.toLowerCase() }
+  )
+    .select("_id slug title price isActive variants")
+    .lean();
+
+  if (!doc) {
+    throw ApiError.notFound("Garment not found in the DIVARA archive");
+  }
+
+  const variants = (doc.variants || []).map((v) => {
+    const availableStock = doc.isActive
+      ? Math.max(0, (v.stockOnHand || 0) - (v.stockReserved || 0))
+      : 0;
+    return {
+      size: v.size,
+      sku: v.sku,
+      availableStock,
+      maxOrderable: Math.min(MAX_QTY_PER_ITEM, availableStock),
+      inStock: availableStock > 0,
+    };
+  });
+
+  return {
+    productId: String(doc._id),
+    slug: doc.slug,
+    isActive: Boolean(doc.isActive),
+    price: doc.price,
+    variants,
+    checkedAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * Uncached batch stock validation for PDP quantity input, Cart Drawer, and pre-checkout checks.
+ * Never cached — always reads fresh MongoDB stockOnHand - stockReserved.
+ */
+export async function validateBulkStock(items = []) {
+  if (!Array.isArray(items) || items.length === 0) {
+    return { allValid: true, results: [], checkedAt: new Date().toISOString() };
+  }
+
+  const ids = [];
+  const slugs = [];
+  for (const item of items) {
+    const key = String(item.productId || item.slug || "").trim();
+    if (/^[a-f\d]{24}$/i.test(key)) ids.push(key);
+    else if (key) slugs.push(key.toLowerCase());
+  }
+
+  const orQuery = [];
+  if (ids.length > 0) orQuery.push({ _id: { $in: ids } });
+  if (slugs.length > 0) orQuery.push({ slug: { $in: slugs } });
+
+  const docs =
+    orQuery.length > 0
+      ? await Product.find({ $or: orQuery })
+          .select("_id slug title price isActive variants")
+          .lean()
+      : [];
+
+  const byId = new Map(docs.map((d) => [String(d._id), d]));
+  const bySlug = new Map(docs.map((d) => [d.slug, d]));
+
+  let allValid = true;
+  const results = items.map((item) => {
+    const rawKey = String(item.productId || item.slug || "").trim();
+    const doc = byId.get(rawKey) || bySlug.get(rawKey.toLowerCase()) || null;
+    const requestedQty = Math.max(1, Math.floor(Number(item.quantity) || 1));
+
+    if (!doc || !doc.isActive) {
+      allValid = false;
+      return {
+        productId: rawKey,
+        slug: doc?.slug || rawKey,
+        size: item.size,
+        requestedQty,
+        availableStock: 0,
+        maxOrderable: 0,
+        clampedQty: 0,
+        valid: false,
+        inStock: false,
+        isActive: false,
+        price: doc?.price ?? null,
+        message: "This garment is no longer available.",
+      };
+    }
+
+    const variant = (doc.variants || []).find((v) => v.size === item.size);
+    const availableStock = variant
+      ? Math.max(0, (variant.stockOnHand || 0) - (variant.stockReserved || 0))
+      : 0;
+    const maxOrderable = Math.min(MAX_QTY_PER_ITEM, availableStock);
+    const clampedQty = Math.min(requestedQty, maxOrderable);
+    const valid = availableStock > 0 && requestedQty <= maxOrderable;
+
+    if (!valid) allValid = false;
+
+    let message = "";
+    if (availableStock <= 0) {
+      message = `"${doc.title}" (${item.size}) is currently out of stock.`;
+    } else if (requestedQty > availableStock) {
+      message = `Only ${availableStock} piece(s) left in size ${item.size}. Quantity adjusted to ${clampedQty}.`;
+    } else if (requestedQty > MAX_QTY_PER_ITEM) {
+      message = `Maximum ${MAX_QTY_PER_ITEM} pieces allowed per size.`;
+    }
+
+    return {
+      productId: String(doc._id),
+      slug: doc.slug,
+      title: doc.title,
+      size: item.size,
+      requestedQty,
+      availableStock,
+      maxOrderable,
+      clampedQty,
+      valid,
+      inStock: availableStock > 0,
+      isActive: true,
+      price: doc.price,
+      message,
+    };
+  });
+
+  return {
+    allValid,
+    results,
+    checkedAt: new Date().toISOString(),
+  };
 }
 
 export async function instantSearchCatalog(q, limit = 8) {

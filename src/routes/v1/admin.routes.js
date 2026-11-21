@@ -6,6 +6,7 @@ import {
   requireSuperAdmin,
 } from "../../middlewares/auth.middleware.js";
 import { validate } from "../../middlewares/validate.middleware.js";
+import { VALID_SIZES } from "../../models/Product.js";
 import {
   getAdminOverview,
   adminListUtmLinks,
@@ -105,7 +106,7 @@ const reorderProductsSchema = z.object({
 });
 
 const adjustStockSchema = z.object({
-  size: z.enum(["XS", "S", "M", "L", "XL", "Free Size"]),
+  size: z.enum(VALID_SIZES),
   delta: z.number().int().min(-500).max(500).optional(),
   stockOnHand: z.number().int().min(0).max(10000).optional(),
 });
@@ -131,7 +132,6 @@ router.patch("/orders/:orderId/status", validate(orderStatusSchema), adminUpdate
 router.patch("/orders/:orderId/return", validate(reviewReturnSchema), adminReviewReturn);
 router.post("/orders/:orderId/refund", validate(refundOrderSchema), adminRefundOrder);
 
-// Customer User Manager
 router.get("/users", adminListUsers);
 router.post("/users", validate(createCustomerSchema), adminCreateUser);
 router.get("/users/:userId", adminGetUserDetail);

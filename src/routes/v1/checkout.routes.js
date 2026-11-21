@@ -3,6 +3,8 @@ import { z } from "zod";
 import { requireAuth, blockAdminShopping } from "../../middlewares/auth.middleware.js";
 import { validate } from "../../middlewares/validate.middleware.js";
 import {
+  preflightCheckout,
+  releaseCheckoutHold,
   startCheckout,
   verifyCheckoutPayment,
   reportCheckoutFailure,
@@ -13,6 +15,19 @@ import {
 } from "../../controllers/checkout.controller.js";
 
 const router = Router();
+
+const preflightSchema = z.object({
+  couponCode: z.string().trim().min(2).max(40).nullable().optional(),
+});
+
+const releaseSchema = z
+  .object({
+    orderId: z.string().min(10).nullable().optional(),
+    razorpayOrderId: z.string().min(5).nullable().optional(),
+  })
+  .refine((d) => Boolean(d.orderId || d.razorpayOrderId), {
+    message: "orderId or razorpayOrderId is required",
+  });
 
 const checkoutSchema = z.object({
   couponCode: z.string().trim().min(2).max(40).nullable().optional(),
@@ -63,6 +78,8 @@ const returnRequestSchema = z.object({
 
 router.use(requireAuth, blockAdminShopping);
 
+router.post("/preflight", validate(preflightSchema), preflightCheckout);
+router.post("/release", validate(releaseSchema), releaseCheckoutHold);
 router.post("/session", validate(checkoutSchema), startCheckout);
 router.post("/verify", validate(verifyPaymentSchema), verifyCheckoutPayment);
 router.post("/failure", validate(reportFailureSchema), reportCheckoutFailure);

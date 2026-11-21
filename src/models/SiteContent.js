@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { CATEGORY_LABELS } from "./Product.js";
 
 const cmsMediaSchema = new mongoose.Schema(
   {
@@ -24,7 +25,7 @@ const siteContentSchema = new mongoose.Schema(
     },
     categories: [
       {
-        id: { type: String, enum: ["saree", "dress", "denim", "shirt"], required: true },
+        id: { type: String, enum: Object.keys(CATEGORY_LABELS), required: true },
         title: { type: String, required: true },
         poster: { type: cmsMediaSchema, required: true },
         path: { type: String, required: true },
@@ -69,6 +70,7 @@ const siteContentSchema = new mongoose.Schema(
         "Kanjivaram",
         "Sarees",
         "Dresses",
+        "Sweatshirts",
         "Winter",
         "Silk",
         "Velvet",

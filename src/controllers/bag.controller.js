@@ -2,22 +2,22 @@ import { User } from "../models/User.js";
 import { Product } from "../models/Product.js";
 import { sendSuccess } from "../utils/apiResponse.js";
 import {
-  getOrCreateBag,
-  formatBagResponse,
+  getHydratedBag,
   addItemToBag,
   updateBagItemQuantity,
 } from "../services/bag.service.js";
 import { ApiError } from "../utils/apiError.js";
 
 export async function getBag(req, res) {
-  const [bag, user] = await Promise.all([
-    getOrCreateBag(req.user._id),
+  res.set("Cache-Control", "no-store, no-cache, must-revalidate");
+  const [bagData, user] = await Promise.all([
+    getHydratedBag(req.user._id),
     User.findById(req.user._id).populate("wishlist", "slug").lean(),
   ]);
 
   return sendSuccess(res, {
     data: {
-      ...formatBagResponse(bag),
+      ...bagData,
       wishlist: (user?.wishlist || []).map((p) => p.slug),
     },
   });
@@ -29,16 +29,17 @@ export async function addBagItem(req, res) {
     size: req.body.size,
     quantity: req.body.quantity,
   });
-  return sendSuccess(res, { statusCode: 201, data });
+  return sendSuccess(res, { statusCode: 201, data, message: data.message });
 }
 
 export async function updateBagItem(req, res) {
   const data = await updateBagItemQuantity(req.user._id, {
     productSlugOrId: req.body.productId,
     size: req.body.size,
+    quantity: req.body.quantity,
     delta: req.body.delta,
   });
-  return sendSuccess(res, { data });
+  return sendSuccess(res, { data, message: data.message });
 }
 
 export async function toggleWishlistItem(req, res) {
