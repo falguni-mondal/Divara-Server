@@ -12,6 +12,7 @@ import crmRoutes from "./crm.routes.js";
 import mediaRoutes from "./media.routes.js";
 import adminRoutes from "./admin.routes.js";
 import analyticsRoutes from "./analytics.routes.js";
+import activityRoutes from "./activity.routes.js";
 
 const router = Router();
 
@@ -36,6 +37,7 @@ router.use("/policies", policyRoutes);
 router.use("/crm", crmRoutes);
 router.use("/media", mediaRoutes);
 router.use("/analytics", analyticsRoutes);
+router.use("/activity", activityRoutes);
 router.use("/admin", adminRoutes);
 
 export default router;

@@ -22,7 +22,12 @@ export function createApp() {
       origin: env.CLIENT_ORIGIN,
       credentials: true,
       methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-      allowedHeaders: ["Content-Type", "Authorization"],
+      allowedHeaders: [
+        "Content-Type",
+        "Authorization",
+        "X-Divara-Device-Id",
+        "X-Divara-Session-Id",
+      ],
     })
   );
 

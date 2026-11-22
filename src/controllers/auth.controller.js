@@ -20,6 +20,11 @@ import {
   rotateRefreshToken,
   revokeCurrentSession,
 } from "../services/auth.service.js";
+import {
+  extractDeviceIdFromReq,
+  mergeVisitorToUser,
+  recordServerEvent,
+} from "../services/activity.service.js";
 
 const TOTP_CHALLENGE_COOKIE = "divara_totp_challenge";
 const TOTP_CHALLENGE_TTL_MS = 5 * 60 * 1000;
@@ -31,7 +36,9 @@ function sha256(str) {
 
 function signTotpChallenge({ userId, email }) {
   const exp = Date.now() + TOTP_CHALLENGE_TTL_MS;
-  const payload = Buffer.from(JSON.stringify({ sub: String(userId), email, exp })).toString("base64url");
+  const payload = Buffer.from(
+    JSON.stringify({ sub: String(userId), email, exp })
+  ).toString("base64url");
   const sig = crypto
     .createHmac("sha256", env.JWT_ACCESS_SECRET)
     .update(payload)
@@ -90,6 +97,24 @@ async function sendOtpEmail({ to, otpCode, heading, note }) {
   });
 }
 
+async function completeLoginTelemetry(req, user, actionName, meta = {}) {
+  const deviceId = extractDeviceIdFromReq(req);
+  if (deviceId) {
+    await mergeVisitorToUser(deviceId, user._id);
+  }
+  await recordServerEvent({
+    req,
+    deviceId,
+    userId: user._id,
+    type: "AUTH",
+    status: "SUCCESS",
+    actionName,
+    pageName: "Account Sign In",
+    path: "/account",
+    meta: { email: user.email, role: user.role, ...meta },
+  });
+}
+
 export async function identifyEmail(req, res) {
   const start = Date.now();
   const email = req.body.email.toLowerCase().trim();
@@ -99,6 +124,16 @@ export async function identifyEmail(req, res) {
   if (elapsed < 80) {
     await new Promise((r) => setTimeout(r, 80 - elapsed));
   }
+
+  await recordServerEvent({
+    req,
+    type: "AUTH",
+    status: "INFO",
+    actionName: existing ? "LOGIN_EMAIL_ENTERED" : "REGISTER_EMAIL_ENTERED",
+    pageName: "Account Sign In",
+    path: "/account",
+    meta: { email: maskEmail(email), mode: existing ? "login" : "register" },
+  });
 
   return sendSuccess(res, {
     data: {
@@ -137,6 +172,16 @@ export async function emailPasswordContinue(req, res) {
       note: "Enter this code on divara.byfalguni.com to complete your registration.",
     });
 
+    await recordServerEvent({
+      req,
+      type: "AUTH",
+      status: "INFO",
+      actionName: "REGISTER_OTP_SENT",
+      pageName: "Account Registration",
+      path: "/account",
+      meta: { email: maskEmail(email) },
+    });
+
     return sendSuccess(res, {
       statusCode: 200,
       message: `Verification OTP sent to ${maskEmail(email)}.`,
@@ -160,10 +205,30 @@ export async function emailPasswordContinue(req, res) {
         summary: `Disabled admin account ${user.email} attempted login.`,
       });
     }
+    await recordServerEvent({
+      req,
+      userId: user._id,
+      type: "AUTH",
+      status: "WARNING",
+      actionName: "LOGIN_BLOCKED_DEACTIVATED",
+      pageName: "Account Sign In",
+      path: "/account",
+      meta: { email: user.email, reason: "Account deactivated" },
+    });
     throw ApiError.forbidden("This account has been deactivated.");
   }
 
   if (!user.passwordHash && user.authProvider === "google") {
+    await recordServerEvent({
+      req,
+      userId: user._id,
+      type: "AUTH",
+      status: "WARNING",
+      actionName: "LOGIN_WRONG_PROVIDER_GOOGLE",
+      pageName: "Account Sign In",
+      path: "/account",
+      meta: { email: user.email, reason: "Attempted password login on Google account" },
+    });
     throw ApiError.badRequest(
       "This email is linked to Google Sign-In. Please click 'Continue with Google'."
     );
@@ -179,6 +244,16 @@ export async function emailPasswordContinue(req, res) {
         summary: `Failed password login attempt for ${user.email}.`,
       });
     }
+    await recordServerEvent({
+      req,
+      userId: user._id,
+      type: "AUTH",
+      status: "FAILED",
+      actionName: "LOGIN_FAILED_PASSWORD",
+      pageName: "Account Sign In",
+      path: "/account",
+      meta: { email: user.email, reason: "Incorrect password" },
+    });
     throw ApiError.unauthorized("Incorrect email or password");
   }
 
@@ -193,7 +268,6 @@ export async function emailPasswordContinue(req, res) {
       await user.save();
     }
 
-    // Bind TOTP verification strictly to this password-verified challenge cookie
     const challengeToken = signTotpChallenge({ userId: user._id, email: user.email });
     res.cookie(TOTP_CHALLENGE_COOKIE, challengeToken, getCookieOptions(TOTP_CHALLENGE_TTL_MS));
 
@@ -202,6 +276,17 @@ export async function emailPasswordContinue(req, res) {
       action: "SUPER_ADMIN_TOTP_CHALLENGE",
       status: "SUCCESS",
       summary: `TOTP authenticator challenge issued for ${user.email}.`,
+    });
+
+    await recordServerEvent({
+      req,
+      userId: user._id,
+      type: "AUTH",
+      status: "INFO",
+      actionName: "SUPER_ADMIN_TOTP_CHALLENGE",
+      pageName: "Account Sign In",
+      path: "/account",
+      meta: { email: user.email },
     });
 
     return sendSuccess(res, {
@@ -251,6 +336,17 @@ export async function emailPasswordContinue(req, res) {
       summary: `2FA login OTP sent to ${maskEmail(targetEmail)} for ${user.email}.`,
     });
 
+    await recordServerEvent({
+      req,
+      userId: user._id,
+      type: "AUTH",
+      status: "INFO",
+      actionName: "ADMIN_OTP_SENT",
+      pageName: "Account Sign In",
+      path: "/account",
+      meta: { email: user.email },
+    });
+
     return sendSuccess(res, {
       statusCode: 200,
       message: `Login OTP sent to ${maskEmail(targetEmail)}.`,
@@ -266,6 +362,9 @@ export async function emailPasswordContinue(req, res) {
   user.lastLoginAt = new Date();
   await user.save();
   const profile = await issueAuthSession(req, res, user);
+
+  // Merge unclaimed visitor records on this device into this account + log success
+  await completeLoginTelemetry(req, user, "LOGIN_SUCCESS", { method: "password" });
 
   return sendSuccess(res, {
     statusCode: 200,
@@ -346,11 +445,29 @@ export async function verifyEmailOtp(req, res) {
         summary: `Expired or missing OTP attempt for ${email}.`,
       });
     }
+    await recordServerEvent({
+      req,
+      type: "AUTH",
+      status: "FAILED",
+      actionName: "OTP_EXPIRED_OR_MISSING",
+      pageName: "Account Verification",
+      path: "/account",
+      meta: { email: maskEmail(email), purpose },
+    });
     throw ApiError.unauthorized("Verification code expired. Please try again.");
   }
 
   if (record.attempts >= 5) {
     await AuthOtp.updateOne({ _id: record._id }, { $set: { isUsed: true } });
+    await recordServerEvent({
+      req,
+      type: "AUTH",
+      status: "WARNING",
+      actionName: "OTP_MAX_ATTEMPTS_LOCKED",
+      pageName: "Account Verification",
+      path: "/account",
+      meta: { email: maskEmail(email), purpose },
+    });
     throw ApiError.unauthorized("Too many invalid attempts. Please request a new code.");
   }
 
@@ -369,10 +486,22 @@ export async function verifyEmailOtp(req, res) {
         summary: `Invalid OTP entered for ${email} (attempt ${updated?.attempts || record.attempts + 1}/5).`,
       });
     }
+    await recordServerEvent({
+      req,
+      type: "AUTH",
+      status: "FAILED",
+      actionName: "OTP_INVALID",
+      pageName: "Account Verification",
+      path: "/account",
+      meta: {
+        email: maskEmail(email),
+        purpose,
+        attempt: updated?.attempts || record.attempts + 1,
+      },
+    });
     throw ApiError.unauthorized("Invalid verification code. Please try again.");
   }
 
-  // Atomic claim prevents concurrent replay of the same OTP
   const claimed = await AuthOtp.findOneAndUpdate(
     { _id: record._id, isUsed: false },
     { $set: { isUsed: true } },
@@ -421,6 +550,12 @@ export async function verifyEmailOtp(req, res) {
   }
 
   const profile = await issueAuthSession(req, res, user);
+  await completeLoginTelemetry(
+    req,
+    user,
+    purpose === "CUSTOMER_REGISTER" ? "REGISTER_SUCCESS" : "ADMIN_OTP_LOGIN_SUCCESS",
+    { method: "email_otp", purpose }
+  );
 
   return sendSuccess(res, {
     statusCode: 200,
@@ -436,9 +571,17 @@ export async function verifySuperAdminTotp(req, res) {
   const email = req.body.email.toLowerCase().trim();
   const code = req.body.code.trim();
 
-  // Enforce password-first challenge cookie
   const challenge = verifyTotpChallengeCookie(req.cookies?.[TOTP_CHALLENGE_COOKIE], email);
   if (!challenge) {
+    await recordServerEvent({
+      req,
+      type: "AUTH",
+      status: "WARNING",
+      actionName: "TOTP_CHALLENGE_EXPIRED",
+      pageName: "Account Verification",
+      path: "/account",
+      meta: { email: maskEmail(email) },
+    });
     throw ApiError.unauthorized("Authentication challenge expired. Please enter your password again.");
   }
 
@@ -451,6 +594,16 @@ export async function verifySuperAdminTotp(req, res) {
   const failedAttempts = appCache.get(attemptsKey) || 0;
   if (failedAttempts >= TOTP_MAX_ATTEMPTS) {
     res.clearCookie(TOTP_CHALLENGE_COOKIE, getCookieOptions(0));
+    await recordServerEvent({
+      req,
+      userId: user._id,
+      type: "AUTH",
+      status: "WARNING",
+      actionName: "TOTP_MAX_ATTEMPTS_LOCKED",
+      pageName: "Account Verification",
+      path: "/account",
+      meta: { email: user.email },
+    });
     throw ApiError.tooManyRequests("Too many failed authenticator attempts. Please wait 10 minutes.");
   }
 
@@ -468,10 +621,19 @@ export async function verifySuperAdminTotp(req, res) {
       status: "FAILED",
       summary: `Invalid TOTP authenticator code entered for ${user.email} (attempt ${failedAttempts + 1}/${TOTP_MAX_ATTEMPTS}).`,
     });
+    await recordServerEvent({
+      req,
+      userId: user._id,
+      type: "AUTH",
+      status: "FAILED",
+      actionName: "TOTP_INVALID",
+      pageName: "Account Verification",
+      path: "/account",
+      meta: { email: user.email, attempt: failedAttempts + 1 },
+    });
     throw ApiError.unauthorized("Invalid 6-digit authenticator code.");
   }
 
-  // Mark code used for 95s (covers ±1 TOTP step window) & clear challenge cookie
   appCache.set(replayKey, true, 95 * 1000);
   appCache.delete(attemptsKey);
   res.clearCookie(TOTP_CHALLENGE_COOKIE, getCookieOptions(0));
@@ -483,6 +645,7 @@ export async function verifySuperAdminTotp(req, res) {
   await user.save();
 
   const profile = await issueAuthSession(req, res, user);
+  await completeLoginTelemetry(req, user, "SUPER_ADMIN_TOTP_LOGIN_SUCCESS", { method: "totp" });
 
   await logAdminAction(req, {
     actor: user,
@@ -500,12 +663,32 @@ export async function verifySuperAdminTotp(req, res) {
 
 export async function googleCallback(req, res) {
   if (!req.user || !req.user.isActive) {
+    await recordServerEvent({
+      req,
+      type: "AUTH",
+      status: "FAILED",
+      actionName: "GOOGLE_LOGIN_FAILED",
+      pageName: "Account Sign In",
+      path: "/account",
+      meta: { reason: "Inactive or missing Google profile" },
+    });
     return res.redirect(`${env.CLIENT_ORIGIN}/account?auth=failed`);
   }
   if (ADMIN_ROLES.has(req.user.role)) {
+    await recordServerEvent({
+      req,
+      userId: req.user._id,
+      type: "AUTH",
+      status: "WARNING",
+      actionName: "GOOGLE_LOGIN_ADMIN_2FA_REQUIRED",
+      pageName: "Account Sign In",
+      path: "/account",
+      meta: { email: req.user.email },
+    });
     return res.redirect(`${env.CLIENT_ORIGIN}/account?auth=admin_2fa_required`);
   }
   await issueAuthSession(req, res, req.user);
+  await completeLoginTelemetry(req, req.user, "GOOGLE_LOGIN_SUCCESS", { method: "google" });
   return res.redirect(`${env.CLIENT_ORIGIN}/account?auth=success`);
 }
 
@@ -515,13 +698,25 @@ export async function refreshSession(req, res) {
 }
 
 export async function logout(req, res) {
-  if (req.user && ADMIN_ROLES.has(req.user.role)) {
-    await logAdminAction(req, {
-      actor: req.user,
-      action: "ADMIN_LOGOUT",
-      status: "SUCCESS",
-      summary: `${req.user.email} signed out of the Admin Panel.`,
+  if (req.user) {
+    await recordServerEvent({
+      req,
+      userId: req.user._id,
+      type: "AUTH",
+      status: "INFO",
+      actionName: "LOGOUT",
+      pageName: "Account",
+      path: "/account",
+      meta: { email: req.user.email },
     });
+    if (ADMIN_ROLES.has(req.user.role)) {
+      await logAdminAction(req, {
+        actor: req.user,
+        action: "ADMIN_LOGOUT",
+        status: "SUCCESS",
+        summary: `${req.user.email} signed out of the Admin Panel.`,
+      });
+    }
   }
   res.clearCookie(TOTP_CHALLENGE_COOKIE, getCookieOptions(0));
   await revokeCurrentSession(req, res);

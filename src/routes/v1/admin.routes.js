@@ -41,6 +41,10 @@ import {
   adminClearUserCart,
   adminDeleteUser,
 } from "../../controllers/adminUsers.controller.js";
+import {
+  adminListVisitors,
+  adminGetProfileIntelligence,
+} from "../../controllers/adminActivity.controller.js";
 
 const router = Router();
 
@@ -140,6 +144,10 @@ router.patch("/users/:userId/toggle-ban", adminToggleUserBan);
 router.post("/users/:userId/revoke-sessions", adminRevokeUserSessions);
 router.delete("/users/:userId/cart", adminClearUserCart);
 router.delete("/users/:userId", adminDeleteUser);
+
+// Anonymous Visitors & Behavioral Intelligence Endpoints
+router.get("/visitors", adminListVisitors);
+router.get("/profiles/:type/:id/intelligence", adminGetProfileIntelligence);
 
 router.put("/cms/site-content", adminUpdateSiteContent);
 router.put("/policies/:slug", adminUpdatePolicy);
