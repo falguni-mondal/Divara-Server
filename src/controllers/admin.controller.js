@@ -23,6 +23,8 @@ import { sendSuccess } from "../utils/apiResponse.js";
 import { ApiError } from "../utils/apiError.js";
 
 const PAID_STATUSES = ["PAID", "PROCESSING", "SHIPPED", "DELIVERED"];
+const PROFIT_STATUSES = ["PAID", "PROCESSING", "SHIPPED", "DELIVERED", "RETURN_REJECTED"];
+const MAX_EXPORT_ORDERS = 25000;
 
 const PRODUCT_ALLOWED_FIELDS = [
   "title",
@@ -785,7 +787,6 @@ export async function adminDeleteProduct(req, res) {
   const product = await Product.findById(req.params.productId);
   if (!product) throw ApiError.notFound("Product not found");
 
-  // Protect historical order records: never hard-delete a product that was ordered in the past
   const hasOrderRecord = await Order.exists({ "items.productId": product._id });
   if (hasOrderRecord) {
     product.isActive = false;
@@ -827,7 +828,7 @@ export async function adminDeleteProduct(req, res) {
   });
 }
 
-// --- 4. Orders Management with Smart Date Filter, Search, Pagination & Full Export ---
+// --- 4. Orders Management with Profit Filter, Smart Date Filter, Search, Pagination & Full Export ---
 export async function adminListOrders(req, res) {
   const { status, from, to, q } = req.query;
   const exportAll = req.query.exportAll === "true";
@@ -835,7 +836,11 @@ export async function adminListOrders(req, res) {
   const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 15));
 
   const filter = {};
-  if (status && status !== "ALL") filter.status = status;
+  if (status === "PROFIT") {
+    filter.status = { $in: PROFIT_STATUSES };
+  } else if (status && status !== "ALL") {
+    filter.status = status;
+  }
 
   if (from || to) {
     filter.createdAt = {};
@@ -862,11 +867,21 @@ export async function adminListOrders(req, res) {
   }
 
   if (exportAll) {
-    const orders = await Order.find(filter).sort({ createdAt: -1 }).limit(5000).lean();
+    const [orders, totalMatching] = await Promise.all([
+      Order.find(filter).sort({ createdAt: -1 }).limit(MAX_EXPORT_ORDERS).lean(),
+      Order.countDocuments(filter),
+    ]);
     return sendSuccess(res, {
       data: {
         orders,
-        pagination: { page: 1, limit: orders.length || 1, total: orders.length, totalPages: 1 },
+        totalMatching,
+        truncated: totalMatching > orders.length,
+        pagination: {
+          page: 1,
+          limit: orders.length || 1,
+          total: totalMatching,
+          totalPages: 1,
+        },
       },
     });
   }
