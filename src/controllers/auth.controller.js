@@ -10,6 +10,9 @@ import { sendSuccess } from "../utils/apiResponse.js";
 import { ADMIN_ROLES, getCookieOptions } from "../middlewares/auth.middleware.js";
 import { logAdminAction } from "../utils/auditLogger.js";
 import { appCache } from "../utils/lruCache.js";
+import { mergeVisitorMemoryToUser } from "../models/AiMemory.js";
+
+
 import {
   generateTotpSecret,
   verifyTotpCode,
@@ -101,6 +104,9 @@ async function completeLoginTelemetry(req, user, actionName, meta = {}) {
   const deviceId = extractDeviceIdFromReq(req);
   if (deviceId) {
     await mergeVisitorToUser(deviceId, user._id);
+    if (user.role === "customer") {
+      await mergeVisitorMemoryToUser(deviceId, user._id).catch(() => {});
+    }
   }
   await recordServerEvent({
     req,

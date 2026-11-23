@@ -36,6 +36,19 @@ const envSchema = z.object({
   RESEND_API_KEY: z.string().optional().default(""),
   MAIL_FROM: z.string().default("DIVARA Atelier <divara@byfalguni.com>"),
   ADMIN_NOTIFICATION_EMAIL: z.string().email().default("byfalguni@gmail.com"),
+
+  // Free-Tier Multi-Provider AI Concierge Keys (all optional; at least 1 LLM key recommended)
+  GROQ_API_KEY: z.string().optional().default(""),
+  GROQ_MODEL: z.string().default("openai/gpt-oss-20b"),
+  GROQ_STT_MODEL: z.string().default("whisper-large-v3-turbo"),
+
+  CEREBRAS_API_KEY: z.string().optional().default(""),
+  CEREBRAS_MODEL: z.string().default("qwen-3.8-27b"),
+
+  GEMINI_API_KEY: z.string().optional().default(""),
+  GEMINI_MODEL: z.string().default("gemini-3.5-flash-lite"),
+
+  DEEPGRAM_API_KEY: z.string().optional().default(""),
 });
 
 const parsed = envSchema.safeParse(process.env);
