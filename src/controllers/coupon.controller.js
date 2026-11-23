@@ -93,17 +93,37 @@ export async function adminCreateCoupon(req, res) {
 }
 
 export async function adminUpdateCoupon(req, res) {
+  const existing = await Coupon.findById(req.params.couponId);
+  if (!existing) throw ApiError.notFound("Coupon not found");
+
   const updates = { ...req.body };
   if (updates.code) updates.code = updates.code.trim().toUpperCase();
   if (updates.name) updates.name = updates.name.trim().toUpperCase();
 
+  const nextType = updates.discountType ?? existing.discountType;
+  const nextVal = updates.discountValue ?? existing.discountValue;
+  if (nextType === "PERCENTAGE" && Number(nextVal) > 100) {
+    throw ApiError.badRequest("Percentage discount cannot exceed 100%");
+  }
+
+  const nextStart = updates.startsAt ? new Date(updates.startsAt) : existing.startsAt;
+  const nextEnd =
+    updates.endsAt === null
+      ? null
+      : updates.endsAt
+      ? new Date(updates.endsAt)
+      : existing.endsAt;
+
+  if (nextEnd && nextStart && nextEnd <= nextStart) {
+    throw ApiError.badRequest("End date/time must be after start date/time");
+  }
+
+  // Allowed even if existing.usedCount > 0 (edits apply to future redemptions)
   const coupon = await Coupon.findByIdAndUpdate(
     req.params.couponId,
     { $set: updates },
     { returnDocument: "after", runValidators: true }
   );
-
-  if (!coupon) throw ApiError.notFound("Coupon not found");
 
   return sendSuccess(res, {
     message: `Coupon ${coupon.code} updated.`,
