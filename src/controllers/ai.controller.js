@@ -87,6 +87,7 @@ export async function handleAiChat(req, res, next) {
     const localHit = await tryLocalServerIntent({
       message,
       user,
+      currentPage,
       visibleItems,
       lastCandidates,
     });

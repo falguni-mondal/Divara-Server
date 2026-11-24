@@ -38,7 +38,6 @@ const SEASON_MAP = {
   autumn: "Autumn",
 };
 
-// Exported strictly for aiTools.service.js (so external LLM color searches never match description noise)
 export const COLOR_FAMILIES = {
   pink: ["pink", "rani", "rose", "blush", "magenta", "coral", "fuchsia", "peach", "lotus"],
   yellow: ["yellow", "mustard", "haldi", "marigold", "ochre", "gold", "golden", "amber", "lemon", "sunflower"],
@@ -62,7 +61,6 @@ const VOCAB = [
   ...Object.keys(CATEGORY_MAP),
 ];
 
-// Any negation, festival/occasion, suggestion, styling, color/fabric nuance, or memory escalates to external LLM
 const EXTERNAL_ONLY_PATTERN =
   /\b(not|no|dont|don't|except|without|avoid|instead|other than|exclude|suggest|recommend|best|better|compare|difference|match|matching|goes with|pair with|why|should i|festival|festive|diwali|puja|holi|eid|navratri|wedding|sangeet|mehendi|reception|party|occasion|gift|birthday|anniversary|remember|forget|my name is|i love|i like|i prefer|i wear|light|heavy|pastel|royal|casual|formal|fabric|silk|cotton|chanderi|banarasi|kanjivaram|velvet|organza|pink|yellow|red|blue|green|white|black|beige|purple|orange|grey|gray|brown|ivory|maroon|teal|gold|golden|rose|rani)\b/i;
 
@@ -198,14 +196,10 @@ function formatCandidateReply(items, label, autoOpenSingle = true) {
   };
 }
 
-/**
- * High-Precision Backend Local AI (Zero External LLM Tokens).
- * Handles ONLY deterministic storefront info, time/date, simple commands, ordinals,
- * exact product names, form dictation, and structured DB filters (category/budget/size/season).
- */
 export async function tryLocalServerIntent({
   message,
   user,
+  currentPage = "/",
   visibleItems = [],
   lastCandidates = [],
 }) {
@@ -227,32 +221,30 @@ export async function tryLocalServerIntent({
   if (/^(who are you|what is your name|what can you do|help)$/.test(text)) {
     return {
       reply:
-        "I'm NIRA, DIVARA's shopping assistant. I can open pages, filter by category/budget/size, scroll smoothly, open products by position or name, check contact/policies/orders, and help fill forms.",
+        "I'm NIRA, DIVARA's shopping assistant. I can open pages, search the archive, filter by category/budget/size, scroll smoothly, open products by position or name, check contact/policies/orders, and help fill forms.",
       clientActions: [],
     };
   }
 
-  // 1b. Exact Current Time & Date (IST — 100% local, zero hallucination)
+  // 1b. Exact Current Time & Date (IST)
   if (/^(?:what(?:'s| is)? )?(?:the )?(?:current |local )?time(?: now| in india| right now)?$|^time(?: now)?$/.test(text)) {
-    const now = new Date();
     const timeStr = new Intl.DateTimeFormat("en-IN", {
       timeZone: "Asia/Kolkata",
       hour: "2-digit",
       minute: "2-digit",
       second: "2-digit",
       hour12: true,
-    }).format(now);
+    }).format(new Date());
     return { reply: `The current time in India is ${timeStr} IST.`, clientActions: [] };
   }
   if (/^(?:what(?:'s| is)? )?(?:today(?:'s)? )?(?:date|day)(?: today)?$|^date today$/.test(text)) {
-    const now = new Date();
     const dateStr = new Intl.DateTimeFormat("en-IN", {
       timeZone: "Asia/Kolkata",
       weekday: "long",
       day: "2-digit",
       month: "2-digit",
       year: "numeric",
-    }).format(now);
+    }).format(new Date());
     return { reply: `Today is ${dateStr} (IST).`, clientActions: [] };
   }
 
@@ -281,13 +273,40 @@ export async function tryLocalServerIntent({
     { key: "phone", rx: /^(?:write |set |put |fill )?(?:my )?(?:phone|mobile)(?: number)? (?:as|to|is) ([+\d\s-]{10,15})$/i },
     { key: "fullName", rx: /^(?:write |set |put |fill )?(?:my )?name (?:as|to|is) (.+)$/i },
   ];
+  const pagePath = String(currentPage || "/").toLowerCase();
   for (const rule of formRules) {
     const m = raw.match(rule.rx);
     if (m && m[1]) {
       const val = m[1].trim();
+      const formType =
+        pagePath.startsWith("/contact") && rule.key === "fullName"
+          ? "contact"
+          : pagePath.startsWith("/account")
+          ? "account_address"
+          : "checkout_address";
+      if (!user && formType !== "contact") {
+        return {
+          reply: "Please sign in first to fill and save your address details.",
+          clientActions: [{ type: "navigate", path: "/account" }],
+        };
+      }
       return {
         reply: `Updated ${rule.key === "line1" ? "Address Line 1" : rule.key} to "${val}".`,
-        clientActions: [{ type: "fill_form", formType: "checkout_address", fields: { [rule.key]: val } }],
+        clientActions: [{ type: "fill_form", formType, fields: { [rule.key]: val } }],
+      };
+    }
+  }
+
+  // 3b. Direct Search Input Typing & Live Search ("search for banarasi", "search silk", "open search and search ivory")
+  const searchQueryMatch = raw.match(
+    /^(?:hey nira |nira )?(?:please |can you )?(?:open search and )?search(?: for)?\s+["']?(.+?)["']?$/i
+  );
+  if (searchQueryMatch && searchQueryMatch[1]) {
+    const q = searchQueryMatch[1].trim().replace(/[?!.]+$/, "");
+    if (q.length >= 2 && !/^(bar|box|overlay|page|it)$/i.test(q)) {
+      return {
+        reply: `Searching DIVARA for "${q}".`,
+        clientActions: [{ type: "overlay", target: "search", query: q }],
       };
     }
   }
@@ -465,13 +484,13 @@ export async function tryLocalServerIntent({
   // 9. Exact Ordinal Selection (1st, 2nd, 3rd, 4th product...)
   const activePool = lastCandidates.length > 0 ? lastCandidates : visibleItems;
 
-  const ordPriceMatch = text.match(/^(?:what is |whats )?(?:the )?(?:price|cost) of (?:the )?(\w+)(?: product| item| piece| one)?$/);
+  const ordPriceMatch = text.match(/^(?:what is |whats )?(?:the )?(?:price|cost) of (?:the )?(\w+)(?: product| item| piece| one| outfit)?$/);
   if (ordPriceMatch && ORDINAL_MAP[ordPriceMatch[1]]) {
     const target = activePool[ORDINAL_MAP[ordPriceMatch[1]] - 1];
     if (target) return { reply: `${target.title} is priced at ${formatInr(target.price)}.`, clientActions: [] };
   }
 
-  const ordOpenMatch = text.match(/^(?:(?:open|show|view|click)\s+)?(?:the\s+)?(\w+)(?:\s+(?:product|item|piece|one))?$/);
+  const ordOpenMatch = text.match(/^(?:(?:open|show|view|click)\s+)?(?:the\s+)?(\w+)(?:\s+(?:product|item|piece|one|outfit))?$/);
   if (ordOpenMatch && ORDINAL_MAP[ordOpenMatch[1]]) {
     const target = activePool[ORDINAL_MAP[ordOpenMatch[1]] - 1];
     if (target?.slug) {
@@ -484,7 +503,9 @@ export async function tryLocalServerIntent({
   }
 
   // 10. Direct Product Price / Stock by Exact Name
-  const priceMatch = text.match(/^(?:what is |whats |tell me )?(?:the )?(?:price|cost|rate|stock|availability) of (.+?)(?: product| piece| item)?$/);
+  const priceMatch = text.match(
+    /^(?:what is |whats |tell me )?(?:the )?(?:price|cost|rate|stock|availability) of (.+?)(?: product| piece| item| outfit)?$/
+  );
   if (priceMatch && priceMatch[1]) {
     const term = priceMatch[1].trim();
     const product = await Product.findOne({
@@ -506,7 +527,7 @@ export async function tryLocalServerIntent({
     }
   }
 
-  // 11. Structured Multi-Filter Search (Category + Budget + Size + Season — Exact Schema Match)
+  // 11. Structured Multi-Filter Search (Category + Budget + Size + Season)
   const words = text.split(" ");
   const catKey = words.find((w) => CATEGORY_MAP[w]);
   const category = catKey ? CATEGORY_MAP[catKey] : null;
@@ -573,8 +594,10 @@ export async function tryLocalServerIntent({
     return formatCandidateReply(items, label, false);
   }
 
-  // 12. Direct Product Open by Exact / Clear Name
-  const openNamed = text.match(/^(?:open|show|view)\s+(?:the\s+|that\s+)?(.+?)(?:\s+product|\s+piece|\s+item)?$/);
+  // 12. Direct Product Open by Name (supports outfit/garment/wear/one + 1-edit title typos like "Vrinsavan")
+  const openNamed = text.match(
+    /^(?:open|show|view)\s+(?:the\s+|that\s+)?(.+?)(?:\s+(?:product|piece|item|outfit|garment|wear|one))?$/
+  );
   if (openNamed && openNamed[1]) {
     const q = openNamed[1].trim();
     if (q.length >= 4 && !CATEGORY_MAP[q]) {
@@ -586,6 +609,20 @@ export async function tryLocalServerIntent({
         .limit(5)
         .lean();
       if (dbHits.length > 0) return formatCandidateReply(dbHits, `matching "${q}"`, true);
+
+      if (q.length >= 5 && !q.includes(" ")) {
+        const allTitles = await Product.find({ isPublished: true })
+          .select("slug title price color colorHex fabric category")
+          .limit(120)
+          .lean();
+        const fuzzyHits = allTitles.filter((p) =>
+          String(p.title || "")
+            .toLowerCase()
+            .split(/[^a-z0-9]+/)
+            .some((w) => w.length >= 5 && isOneEditAway(q, w))
+        );
+        if (fuzzyHits.length > 0) return formatCandidateReply(fuzzyHits, `matching "${q}"`, true);
+      }
     }
   }
 

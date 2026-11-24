@@ -215,11 +215,12 @@ export const AI_TOOL_DEFINITIONS = [
     function: {
       name: "open_overlay",
       description:
-        "Open a storefront overlay such as the Shopping Bag drawer, Search bar, or Cookie Preferences.",
+        "Open a storefront overlay such as the Shopping Bag drawer, Search bar (optionally filling and running a search query), or Cookie Preferences.",
       parameters: {
         type: "object",
         properties: {
           target: { type: "string", enum: ["cart", "search", "cookie_preferences"] },
+          query: { type: "string", description: "Optional search text to type into Search bar and search" },
         },
         required: ["target"],
       },
@@ -535,7 +536,7 @@ export async function executeStorefrontTool(toolName, rawArgs, context) {
 
       await AiMemory.findOneAndUpdate(identityFilter, updateDoc, {
         upsert: true,
-        new: true,
+        returnDocument: "after",
         setDefaultsOnInsert: true,
       });
       flags.memoryUpdated = true;
@@ -584,8 +585,9 @@ export async function executeStorefrontTool(toolName, rawArgs, context) {
     case "open_overlay": {
       const allowed = new Set(["cart", "search", "cookie_preferences"]);
       const target = allowed.has(args.target) ? args.target : "cart";
-      clientActions.push({ type: "overlay", target });
-      return { ok: true, target };
+      const query = target === "search" && typeof args.query === "string" ? args.query.trim().slice(0, 100) : "";
+      clientActions.push(query ? { type: "overlay", target, query } : { type: "overlay", target });
+      return { ok: true, target, ...(query ? { query } : {}) };
     }
 
     case "trigger_google_signin": {

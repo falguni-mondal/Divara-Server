@@ -178,7 +178,7 @@ export async function identifyOrRecoverDevice({
       },
     };
     return DeviceProfile.findOneAndUpdate({ _id: profile._id }, update, {
-      new: true,
+      returnDocument: "after",
     }).lean();
   };
 
