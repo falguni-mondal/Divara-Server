@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import ImageKit from "imagekit";
 import { env } from "./env.js";
 
@@ -21,7 +22,7 @@ export function getImageKit() {
 
 /**
  * Generates short-lived client upload auth parameters ({ token, expire, signature }).
- * Private key never leaves the Express server.
+ * Strictly reserved for Admin uploads; private key never leaves the Express server.
  */
 export function getImageKitAuthParams() {
   const ik = getImageKit();
@@ -29,6 +30,30 @@ export function getImageKitAuthParams() {
     throw new Error("ImageKit credentials are not configured in environment variables.");
   }
   return ik.getAuthenticationParameters();
+}
+
+/**
+ * Uploads a validated customer review image buffer strictly into /divara/reviews.
+ */
+export async function uploadReviewImageBuffer({ buffer, ext }) {
+  const ik = getImageKit();
+  if (!ik) {
+    throw new Error("ImageKit credentials are not configured in environment variables.");
+  }
+
+  const fileName = `review_${Date.now()}_${crypto.randomBytes(6).toString("hex")}.${ext}`;
+  const uploaded = await ik.upload({
+    file: buffer,
+    fileName,
+    folder: "/divara/reviews",
+    useUniqueFileName: true,
+  });
+
+  const base = env.IMAGEKIT_URL_ENDPOINT.replace(/\/$/, "");
+  return {
+    url: uploaded.url || `${base}${uploaded.filePath}`,
+    fileId: uploaded.fileId,
+  };
 }
 
 /**

@@ -43,7 +43,7 @@ const chatSchema = z.object({
 });
 
 function resolveDeviceId(req) {
-  const raw = String(req.cookies?.divara_did || req.headers["x-divara-device-id"] || "").trim();
+  const raw = String(req.cookies?.divara_did || "").trim();
   return raw && raw.length <= 64 ? raw : null;
 }
 

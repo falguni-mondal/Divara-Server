@@ -257,6 +257,9 @@ export async function adminToggleUserBan(req, res) {
   if (!user) throw ApiError.notFound("Customer account not found");
 
   user.isActive = !user.isActive;
+  if (!user.isActive) {
+    user.tokenVersion = Number(user.tokenVersion || 0) + 1;
+  }
   await user.save();
 
   // Immediately revoke all active sessions if banned
@@ -284,10 +287,13 @@ export async function adminRevokeUserSessions(req, res) {
   const user = await User.findOne({ _id: req.params.userId, role: "customer" });
   if (!user) throw ApiError.notFound("Customer account not found");
 
-  const result = await RefreshToken.updateMany(
-    { userId: user._id, isRevoked: false },
-    { $set: { isRevoked: true } }
-  );
+  const [result] = await Promise.all([
+    RefreshToken.updateMany(
+      { userId: user._id, isRevoked: false },
+      { $set: { isRevoked: true } }
+    ),
+    User.updateOne({ _id: user._id }, { $inc: { tokenVersion: 1 } }),
+  ]);
 
   await logAdminAction(req, {
     action: "USER_SESSIONS_REVOKED",

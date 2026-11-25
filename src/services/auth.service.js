@@ -20,7 +20,12 @@ function parseDurationMs(expr, fallbackMs = 15 * 60 * 1000) {
 
 function signAccessToken(user) {
   return jwt.sign(
-    { sub: String(user._id), role: user.role, email: user.email },
+    {
+      sub: String(user._id),
+      role: user.role,
+      email: user.email,
+      tv: Number(user.tokenVersion || 0),
+    },
     env.JWT_ACCESS_SECRET,
     { expiresIn: env.JWT_ACCESS_EXPIRES_IN }
   );

@@ -27,8 +27,7 @@ function blockStaffRoles(req, res, next) {
 
 function aiRateKey(req) {
   if (req.user?._id) return `u:${req.user._id}`;
-  const did = req.cookies?.divara_did || req.headers["x-divara-device-id"] || "";
-  return `v:${req.ip}:${String(did).slice(0, 32)}`;
+  return `v:${req.ip}`;
 }
 
 const aiChatLimiter = rateLimit({

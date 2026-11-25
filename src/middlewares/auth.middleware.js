@@ -15,7 +15,7 @@ export function getCookieOptions(maxAgeMs) {
   return {
     httpOnly: true,
     secure: isProd,
-    sameSite: isProd ? "none" : "lax",
+    sameSite: "lax",
     path: "/",
     ...(maxAgeMs ? { maxAge: maxAgeMs } : {}),
   };
@@ -29,7 +29,9 @@ export async function optionalAuth(req, _res, next) {
     const payload = jwt.verify(token, env.JWT_ACCESS_SECRET);
     const user = await User.findById(payload.sub).select("-passwordHash").lean();
 
-    if (user && user.isActive) {
+    const tokenVer = typeof payload.tv === "number" ? payload.tv : 0;
+    const userVer = Number(user?.tokenVersion || 0);
+    if (user && user.isActive && tokenVer === userVer) {
       req.user = user;
     }
     return next();
@@ -48,7 +50,9 @@ export async function requireAuth(req, _res, next) {
     const payload = jwt.verify(token, env.JWT_ACCESS_SECRET);
     const user = await User.findById(payload.sub).select("-passwordHash").lean();
 
-    if (!user || !user.isActive) {
+    const tokenVer = typeof payload.tv === "number" ? payload.tv : 0;
+    const userVer = Number(user?.tokenVersion || 0);
+    if (!user || !user.isActive || tokenVer !== userVer) {
       return next(ApiError.unauthorized("Account session is no longer active"));
     }
 
