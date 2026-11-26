@@ -227,7 +227,7 @@ export async function tryLocalServerIntent({
   }
 
   // 1b. Exact Current Time & Date (IST)
-  if (/^(?:what(?:'s| is)? )?(?:the )?(?:current |local )?time(?: now| in india| right now)?$|^time(?: now)?$/.test(text)) {
+  if (/^(?:what(?:'s| is)? )?(?:the )?(?:current |local )?time(?: is it)?(?: now| in india| right now)?$|^time(?: now)?$/.test(text)) {
     const timeStr = new Intl.DateTimeFormat("en-IN", {
       timeZone: "Asia/Kolkata",
       hour: "2-digit",

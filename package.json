@@ -7,7 +7,9 @@
   "scripts": {
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
-    "seed": "node src/seed/seedDatabase.js"
+    "seed": "node src/seed/seedDatabase.js",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "engines": {
     "node": ">=20.0.0"
@@ -29,6 +31,10 @@
     "passport-google-oauth20": "^2.0.0",
     "razorpay": "^2.9.6",
     "resend": "^4.1.2",
-    "zod": "^3.24.2"
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "supertest": "^7.3.2",
+    "vitest": "^5.1.2"
   }
 }
